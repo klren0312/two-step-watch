@@ -10,8 +10,11 @@ Galaxy Watch4 Classic（Wear OS 3+）上的离线 GPX 轨迹导航应用。手�
   <img src="docs/screenshots/navigation.png" width="210" alt="离线导航" />
   <img src="docs/screenshots/web-import.png" width="210" alt="网页导入" />
 </p>
+<p align="center">
+  <img src="docs/screenshots/physical-library.png" width="210" alt="真机路线库" />
+</p>
 
-> 截图来自 Wear OS 4 模拟器（454×454），定位使用模拟 GPS；网页导入二维码为模拟器局域网地址，真机上为手表 Wi-Fi 地址。真机验收待完成。
+> 前四张为 Wear OS 4 模拟器（454×454，模拟 GPS）；最后一张为真机 SM-R8950（Galaxy Watch4 Classic 46mm，Android 16 / SDK 36）。真机导航与续航待实测。
 
 ## 功能
 
@@ -84,18 +87,20 @@ tools\pull-records.bat
 /sdcard/Android/data/com.klkl.tracknav/files/exports/
 ```
 
-## 文档
+## 文档索引
 
-- [领域词汇](GLOSSARY.md)
-- [ADR-0001：手表端单 APK、adb 导入、零网络](docs/adr/0001-watch-only-offline-adb-import.md)
-- [ADR-0002：v1 不提供底图](docs/adr/0002-no-basemap-v1.md)
-- [ADR-0003：无 GMS 平台 GNSS 与熄屏跟踪](docs/adr/0003-gms-free-gnss-screen-off.md)
-- [ADR-0004：局域网上传页作为第二导入通道](docs/adr/0004-lan-web-upload.md)
+- [AGENT.md](AGENT.md)：AI 代理工作约定——构建/模拟器/安全边界、提交后自动推送规则。
+- **README.md**：本文件，功能、安装、导入/导出、验证状态与已知限制。
+- [GLOSSARY.md](GLOSSARY.md)：轨迹、标注点、偏离、回归点、局域网上传页等领域术语。
+- **ADR**：[0001 手表端单 APK/离线导航](docs/adr/0001-watch-only-offline-adb-import.md)、[0002 v1 无底图](docs/adr/0002-no-basemap-v1.md)、[0003 无 GMS 平台 GNSS](docs/adr/0003-gms-free-gnss-screen-off.md)、[0004 局域网上传页](docs/adr/0004-lan-web-upload.md)。
+- [docs/screenshots](docs/screenshots/)：模拟器与真机截图。
 
 ## 状态与限制
 
 - 版本 `0.2.0`；37 个单元测试通过；已在 Wear OS 4 模拟器验证网页上传自动导入、导航、后台记录与导出。
-- 真机 GPS 冷启动、罗盘、表圈、Ambient 切换与整段续航验收待完成。
+- 真机 **SM-R8950**（Galaxy Watch4 Classic 46mm，国行 `wiseulcn`，Android 16 / SDK 36，450×450，含 GMS）已安装签名 v0.2.0；定位、通知、后台定位权限已授权，应用启动正常。
+- 真机网页导入已用 PC 同热点验证：146 m 测试轨迹与 17.3 km「牛王寨蝴蝶线」均成功导入；离开上传页后服务停止。
+- 待实测：1 km / 17 km 的 GPS 冷启动、罗盘/磁偏角、表圈、Ambient、前台通知与整段续航；手机浏览器上传路径待验。
 - 网页导入需要手表连 Wi-Fi、页面保持打开；HTTP 无 TLS，地址 token 仅在离开页面前有效。
 - 进程被杀后的“继续导航”尚未实现；已走轨迹会恢复导出。
 - 自接近的回头弯路段存在 GPS 几何歧义，偏航判定需真机路线复验。

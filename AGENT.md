@@ -49,11 +49,13 @@
 - `app/src/main/java/com/klkl/tracknav/ui/WebImportScreen.kt`：二维码/地址与停服生命周期。
 - `app/src/main/java/com/klkl/tracknav/navigation/`：导航引擎、路线匹配、定位/罗盘、记录、前台服务。
 - `app/src/main/java/com/klkl/tracknav/ui/`：路线库、详情、导航三页、总结、设置。
-- `docs/screenshots/`：README 使用的模拟器截图。
+- `docs/screenshots/`：README 使用的模拟器与真机截图。
 - `docs/adr/`：已确认的架构决策。
 
 ## 当前状态
 
 - v0.2.0；37 个单元测试通过；已在 Wear OS 4 模拟器验证。
-- 真机安装与 1 km / 17 km 续航/罗盘/表圈/Ambient 验收待完成。
+- 真机 SM-R8950（Galaxy Watch4 Classic 46mm，国行 wiseulcn，Android 16 / SDK 36，450×450，含 GMS）已安装签名 v0.2.0；定位/通知/后台定位已授权。
+- 真机网页导入已用 PC 同热点验证：146 m 测试轨迹与 17.3 km 牛王寨蝴蝶线导入成功；离开页面服务停止。
+- 待实测：1 km / 17 km 的 GPS/罗盘/表圈/Ambient/前台通知/续航；手机浏览器上传路径待验。
 - 进程死亡后的活动导航恢复尚未实现；已走轨迹会恢复导出。
