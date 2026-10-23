@@ -43,7 +43,10 @@ fun TrackNavApp(ambient: Boolean = false) {
     }
     val debugRequested = debugMode == "replay" || debugMode == "live"
     LaunchedEffect(debugMode, debugReplayConsumed, routes) {
-        if (debugRequested && !debugReplayConsumed && routes.isNotEmpty()) {
+        if (debugMode == "web" && !debugReplayConsumed) {
+            debugReplayConsumed = true
+            viewModel.openWebImport()
+        } else if (debugRequested && !debugReplayConsumed && routes.isNotEmpty()) {
             debugReplayConsumed = true
             viewModel.beginNavigation(
                 routeId = routes.first().id,
@@ -79,6 +82,11 @@ fun TrackNavApp(ambient: Boolean = false) {
         }
 
         Screen.Settings -> SettingsScreen(viewModel = viewModel)
+
+        Screen.WebImport -> WebImportScreen(
+            viewModel = viewModel,
+            repository = application.routeRepository,
+        )
 
         Screen.Summary -> {
             val summary = viewModel.lastSummary

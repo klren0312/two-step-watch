@@ -103,7 +103,7 @@ fun RouteLibraryScreen(
             }
             item {
                 Text(
-                    text = "把 GPX 文件放进手表的 import 目录，再点下方“导入新轨迹”。",
+                    text = "用手机网页上传，或把 GPX 放进手表的 import 目录后点扫描。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     textAlign = TextAlign.Center,
@@ -138,12 +138,23 @@ fun RouteLibraryScreen(
 
         item {
             Button(
-                onClick = viewModel::importInbox,
-                enabled = !viewModel.importBusy,
+                onClick = viewModel::openWebImport,
                 modifier = Modifier.fillMaxWidth(0.9f),
             ) {
-                Text(if (viewModel.importBusy) "正在导入…" else "导入新轨迹")
+                Text("网页导入（手机上传）")
             }
+        }
+
+        item {
+            Text(
+                text = if (viewModel.importBusy) "正在扫描…" else "从 import 目录导入（adb）",
+                modifier = Modifier
+                    .clickable(enabled = !viewModel.importBusy, onClick = viewModel::importInbox)
+                    .padding(6.dp),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+            )
         }
 
         viewModel.message?.let { message ->
@@ -448,7 +459,7 @@ fun SettingsScreen(viewModel: RouteViewModel) {
         }
         item {
             Text(
-                text = "回到主页点“导入新轨迹”。重复文件会自动跳过；删除路线后可重新导入。",
+                text = "回到主页点“从 import 目录导入（adb）”。重复文件会自动跳过；删除路线后可重新导入。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center,
@@ -472,7 +483,7 @@ fun SettingsScreen(viewModel: RouteViewModel) {
         }
         item {
             Text(
-                text = "本应用不申请网络权限，数据只保存在手表。",
+                text = "本应用仅在上传页临时监听局域网，不发起外网请求；导航数据只保存在手表。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center,
@@ -480,7 +491,7 @@ fun SettingsScreen(viewModel: RouteViewModel) {
         }
         item {
             Text(
-                text = "版本 0.1.0",
+                text = "版本 0.2.0",
                 style = MaterialTheme.typography.bodyExtraSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

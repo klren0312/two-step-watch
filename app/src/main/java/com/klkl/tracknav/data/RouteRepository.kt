@@ -36,6 +36,32 @@ class RouteRepository(context: Context) {
         report
     }
 
+    suspend fun importUploaded(fileName: String, bytes: ByteArray): ImportReport =
+        withContext(Dispatchers.IO) {
+            require(bytes.size <= RouteStorage.MAX_GPX_BYTES) { "文件超过 20 MB" }
+            storage.ensureDirectories()
+            val safeBase = fileName
+                .substringAfterLast('/')
+                .substringAfterLast('\\')
+                .replace(Regex("[^\\p{L}\\p{N}._-]"), "_")
+                .trim()
+                .take(80)
+                .ifBlank { "upload" }
+            val safeName = if (safeBase.endsWith(".gpx", ignoreCase = true)) {
+                safeBase
+            } else {
+                "$safeBase.gpx"
+            }
+            val target = File(
+                storage.importDirectory,
+                "web-${System.currentTimeMillis()}-$safeName",
+            )
+            target.writeBytes(bytes)
+            val report = storage.importInbox()
+            _routes.value = storage.loadAll()
+            report
+        }
+
     suspend fun delete(routeId: String): Boolean = withContext(Dispatchers.IO) {
         val deleted = storage.delete(routeId)
         if (deleted) {

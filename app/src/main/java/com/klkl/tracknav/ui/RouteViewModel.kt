@@ -23,6 +23,7 @@ sealed interface Screen {
     data class Prepare(val routeId: String) : Screen
     data object Nav : Screen
     data object Summary : Screen
+    data object WebImport : Screen
 }
 
 data class NavigationSummaryData(
@@ -77,6 +78,11 @@ class RouteViewModel(
     fun openSettings() {
         message = null
         screen = Screen.Settings
+    }
+
+    fun openWebImport() {
+        message = null
+        screen = Screen.WebImport
     }
 
     fun goBack() {
