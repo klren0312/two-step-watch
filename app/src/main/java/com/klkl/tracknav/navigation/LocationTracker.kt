@@ -9,6 +9,7 @@ import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
 import android.os.Looper
+import android.os.SystemClock
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -22,6 +23,9 @@ data class GnssSatelliteInfo(
     val visible: Int = 0,
     val usedInFix: Int = 0,
 )
+
+internal const val LOCATION_FIX_TIMEOUT_MILLIS = 10_000L
+private const val LAST_KNOWN_MAX_AGE_MILLIS = 30_000L
 
 class LocationTracker(private val context: Context) {
 
@@ -103,8 +107,20 @@ class LocationTracker(private val context: Context) {
             running = false
             return false
         }
-        manager.getLastKnownLocation(LocationManager.GPS_PROVIDER)?.let(::emit)
+        manager.getLastKnownLocation(LocationManager.GPS_PROVIDER)
+            ?.takeIf(::isFresh)
+            ?.let(::emit)
         return true
+    }
+
+    private fun isFresh(location: Location): Boolean {
+        val elapsedNanos = location.elapsedRealtimeNanos
+        val ageMillis = if (elapsedNanos > 0L) {
+            (SystemClock.elapsedRealtimeNanos() - elapsedNanos) / 1_000_000L
+        } else {
+            System.currentTimeMillis() - location.time
+        }
+        return ageMillis in 0L..LAST_KNOWN_MAX_AGE_MILLIS
     }
 
     fun stop() {
@@ -147,6 +163,10 @@ class LocationTracker(private val context: Context) {
                 speedMps = location.speed.takeIf { location.hasSpeed() },
                 bearingDegrees = location.bearing.takeIf { location.hasBearing() },
                 timeMillis = location.time.takeIf { it > 0L } ?: System.currentTimeMillis(),
+                elapsedRealtimeMillis = location.elapsedRealtimeNanos
+                    .takeIf { it > 0L }
+                    ?.let { it / 1_000_000L }
+                    ?: SystemClock.elapsedRealtime(),
             ),
         )
     }

@@ -7,16 +7,22 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
-class RouteRepository(context: Context) {
+class RouteRepository internal constructor(
+    private val storage: RouteStorage,
+) {
 
-    private val externalRoot = context.getExternalFilesDir(null) ?: context.filesDir
-    private val storage = RouteStorage(
-        routesDirectory = File(context.filesDir, "routes"),
-        importDirectory = File(externalRoot, "import"),
+    constructor(context: Context) : this(
+        RouteStorage(
+            routesDirectory = File(context.filesDir, "routes"),
+            importDirectory = File(context.getExternalFilesDir(null) ?: context.filesDir, "import"),
+        )
     )
 
+    private val importMutex = Mutex()
     private val _routes = MutableStateFlow<List<Route>>(emptyList())
     val routes: StateFlow<List<Route>> = _routes.asStateFlow()
 
@@ -25,19 +31,27 @@ class RouteRepository(context: Context) {
 
     suspend fun load() {
         withContext(Dispatchers.IO) {
-            storage.ensureDirectories()
-            _routes.value = storage.loadAll()
+            importMutex.withLock {
+                storage.ensureDirectories()
+                _routes.value = storage.loadAll()
+            }
         }
     }
 
     suspend fun importInbox(): ImportReport = withContext(Dispatchers.IO) {
-        val report = storage.importInbox()
-        _routes.value = storage.loadAll()
-        report
+        importMutex.withLock {
+            val report = storage.importInbox()
+            _routes.value = storage.loadAll()
+            report
+        }
     }
 
-    suspend fun importUploaded(fileName: String, bytes: ByteArray): ImportReport =
-        withContext(Dispatchers.IO) {
+    suspend fun importUploaded(
+        fileName: String,
+        bytes: ByteArray,
+        nowMillis: Long = System.currentTimeMillis(),
+    ): ImportReport = withContext(Dispatchers.IO) {
+        importMutex.withLock {
             require(bytes.size <= RouteStorage.MAX_GPX_BYTES) { "文件超过 20 MB" }
             storage.ensureDirectories()
             val safeBase = fileName
@@ -52,21 +66,21 @@ class RouteRepository(context: Context) {
             } else {
                 "$safeBase.gpx"
             }
-            val target = File(
-                storage.importDirectory,
-                "web-${System.currentTimeMillis()}-$safeName",
-            )
+            val target = File(storage.importDirectory, "web-$nowMillis-$safeName")
             target.writeBytes(bytes)
-            val report = storage.importInbox()
+            val report = storage.importFile(target, nowMillis)
             _routes.value = storage.loadAll()
             report
         }
+    }
 
     suspend fun delete(routeId: String): Boolean = withContext(Dispatchers.IO) {
-        val deleted = storage.delete(routeId)
-        if (deleted) {
-            _routes.value = storage.loadAll()
+        importMutex.withLock {
+            val deleted = storage.delete(routeId)
+            if (deleted) {
+                _routes.value = storage.loadAll()
+            }
+            deleted
         }
-        deleted
     }
 }

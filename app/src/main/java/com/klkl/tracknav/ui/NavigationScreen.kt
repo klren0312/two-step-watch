@@ -6,6 +6,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -18,6 +19,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -43,10 +45,12 @@ import androidx.wear.compose.material3.ScreenScaffold
 import androidx.wear.compose.material3.Text
 import com.klkl.tracknav.domain.bearingDegrees
 import com.klkl.tracknav.domain.haversineMeters
+import com.klkl.tracknav.navigation.LOCATION_FIX_TIMEOUT_MILLIS
 import com.klkl.tracknav.navigation.NavigationState
 import com.klkl.tracknav.ui.theme.TrackGreen
 import com.klkl.tracknav.ui.theme.TrackOffRoute
 import kotlin.math.roundToInt
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 @Composable
@@ -74,6 +78,13 @@ fun ActiveNavigationScreen(
     var zoomIndex by rememberSaveable { mutableIntStateOf(2) }
     val pagerState = rememberPagerState(initialPage = 0, pageCount = { 3 })
     val scope = rememberCoroutineScope()
+    var showControlsHint by rememberSaveable { mutableStateOf(true) }
+    LaunchedEffect(showControlsHint) {
+        if (showControlsHint) {
+            delay(6_000L)
+            showControlsHint = false
+        }
+    }
 
     Box(
         modifier = Modifier
@@ -98,6 +109,7 @@ fun ActiveNavigationScreen(
                             .coerceIn(0, NAVIGATION_ZOOM_METERS.lastIndex)
                     },
                     onToggleOverview = { overview = !overview },
+                    onFinishNavigation = viewModel::finishNavigation,
                     onScaleClick = {
                         if (overview) {
                             overview = false
@@ -114,6 +126,22 @@ fun ActiveNavigationScreen(
 
                 else -> NavigationWaypointsPage(viewModel, active)
             }
+        }
+
+        if (showControlsHint && pagerState.currentPage == 0) {
+            Text(
+                text = "表圈缩放 · 双击全览 · 左右滑动",
+                style = MaterialTheme.typography.bodyExtraSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 116.dp)
+                    .clip(RoundedCornerShape(50))
+                    .background(Color.Black.copy(alpha = 0.8f))
+                    .clickable { showControlsHint = false }
+                    .padding(horizontal = 10.dp, vertical = 5.dp),
+            )
         }
 
         PageDots(
@@ -171,7 +199,19 @@ fun AmbientNavigationScreen(active: NavigationState.Active?) {
                 style = MaterialTheme.typography.titleLarge,
                 color = MaterialTheme.colorScheme.primary,
             )
-            if (snapshot?.offRoute == true) {
+            if (active.backgroundServiceFailed) {
+                Text(
+                    text = "后台服务失败",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            } else if ((active.fixAgeMillis ?: 0L) > LOCATION_FIX_TIMEOUT_MILLIS) {
+                Text(
+                    text = "定位中断 ${(active.fixAgeMillis ?: 0L) / 1_000L} 秒",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            } else if (snapshot?.offRoute == true) {
                 Text(
                     text = "偏离 ${snapshot.distanceToTrackMeters.roundToInt()} m",
                     style = MaterialTheme.typography.bodySmall,
@@ -192,10 +232,13 @@ private fun NavigationMapPage(
     onToggleHeadingUp: () -> Unit,
     onZoomStep: (Int) -> Unit,
     onToggleOverview: () -> Unit,
+    onFinishNavigation: () -> Unit,
     onScaleClick: () -> Unit,
 ) {
     val snapshot = active.snapshot
     val fix = active.fix
+    val locationStale = fix != null &&
+        (active.fixAgeMillis ?: 0L) > LOCATION_FIX_TIMEOUT_MILLIS
 
     Box(modifier = Modifier.fillMaxSize()) {
         NavigationMap(
@@ -215,10 +258,11 @@ private fun NavigationMapPage(
                 .padding(top = 18.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            val gpsWarning = !active.gpsEnabled ||
+            val gpsWarning = !active.gpsEnabled || locationStale ||
                 (fix != null && fix.accuracyMeters > 50f)
             val gpsText = when {
                 !active.gpsEnabled -> "GPS 关"
+                locationStale -> "定位中断"
                 fix == null -> "定位中"
                 fix.accuracyMeters > 50f -> "GPS 弱"
                 else -> "±${fix.accuracyMeters.roundToInt()}m"
@@ -228,8 +272,15 @@ private fun NavigationMapPage(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Pill(text = gpsText, warning = gpsWarning)
+                if (active.backgroundServiceFailed) {
+                    Pill(text = "后台失效", warning = true)
+                }
                 Pill(
-                    text = if (headingUp) "朝向" else "北向",
+                    text = when {
+                        !headingUp -> "北向"
+                        active.headingDegrees == null -> "无罗盘"
+                        else -> "朝向"
+                    },
                     onClick = onToggleHeadingUp,
                 )
                 Pill(
@@ -242,7 +293,7 @@ private fun NavigationMapPage(
                 )
             }
 
-            if (snapshot?.offRoute == true && snapshot.returnPoint != null && fix != null) {
+            if (!locationStale && snapshot?.offRoute == true && snapshot.returnPoint != null && fix != null) {
                 Spacer(modifier = Modifier.height(4.dp))
                 OffRoutePill(
                     distanceMeters = snapshot.distanceToTrackMeters,
@@ -261,12 +312,24 @@ private fun NavigationMapPage(
             }
         }
 
-        if (fix == null) {
+        if (fix == null || locationStale) {
             Text(
-                text = "等待定位…",
+                text = if (locationStale) {
+                    "定位中断 ${(active.fixAgeMillis ?: 0L) / 1_000L} 秒"
+                } else {
+                    "等待定位…"
+                },
                 style = MaterialTheme.typography.titleSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.align(Alignment.Center),
+                color = if (locationStale) {
+                    MaterialTheme.colorScheme.error
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
+                textAlign = TextAlign.Center,
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .background(Color.Black.copy(alpha = 0.7f))
+                    .padding(8.dp),
             )
         }
 
@@ -293,11 +356,9 @@ private fun NavigationMapPage(
             Spacer(modifier = Modifier.height(4.dp))
             ProgressBar(fraction = snapshot?.progressFraction ?: 0f)
             if (snapshot?.completed == true) {
-                Text(
-                    text = "已到达终点",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.primary,
-                )
+                Button(onClick = onFinishNavigation) {
+                    Text("已到达 · 结束导航")
+                }
             }
         }
     }
@@ -358,17 +419,22 @@ private fun NavigationStatsPage(active: NavigationState.Active) {
                 )
             }
             item {
-                val accuracy = active.fix?.accuracyMeters?.takeIf { it < 900f }
+                val stale = (active.fixAgeMillis ?: 0L) > LOCATION_FIX_TIMEOUT_MILLIS
+                val accuracy = active.fix?.accuracyMeters?.takeIf { it < 900f && !stale }
                 StatLine(
                     label = "定位质量",
-                    value = "${active.satellites.usedInFix}/${active.satellites.visible} 星 · " +
-                        (accuracy?.let { "±${it.roundToInt()} m" } ?: "--"),
+                    value = if (stale) {
+                        "定位中断 ${(active.fixAgeMillis ?: 0L) / 1_000L} 秒"
+                    } else {
+                        "${active.satellites.usedInFix}/${active.satellites.visible} 星 · " +
+                            (accuracy?.let { "±${it.roundToInt()} m" } ?: "--")
+                    },
                 )
             }
             item {
                 StatLine(
                     label = "到达标注点",
-                    value = "${snapshot?.arrivedWaypointNames?.size ?: 0}/${active.waypoints.size}",
+                    value = "${snapshot?.arrivedWaypointIndices?.size ?: 0}/${active.waypoints.size}",
                 )
             }
             if (!active.gpsEnabled) {
@@ -391,6 +457,12 @@ private fun NavigationWaypointsPage(
     active: NavigationState.Active,
 ) {
     var endArmed by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(endArmed) {
+        if (endArmed) {
+            delay(10_000L)
+            endArmed = false
+        }
+    }
     val listState = rememberScalingLazyListState()
     ScreenScaffold(
         scrollState = listState,
@@ -420,15 +492,17 @@ private fun NavigationWaypointsPage(
             }
             items(active.waypoints.size) { index ->
                 val waypoint = active.waypoints[index]
-                val fix = active.fix
+                val fix = active.fix.takeIf {
+                    (active.fixAgeMillis ?: 0L) <= LOCATION_FIX_TIMEOUT_MILLIS
+                }
                 val distance = fix?.let {
                     haversineMeters(it.lat, it.lon, waypoint.lat, waypoint.lon)
                 }
                 val bearing = fix?.let {
                     bearingDegrees(it.lat, it.lon, waypoint.lat, waypoint.lon)
                 }
-                val arrived = active.snapshot?.arrivedWaypointNames
-                    ?.contains(waypoint.name) == true
+                val arrived = active.snapshot?.arrivedWaypointIndices
+                    ?.contains(index) == true
                 Column(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalAlignment = Alignment.CenterHorizontally,
@@ -532,10 +606,12 @@ private fun Pill(
     }
     Box(
         modifier = Modifier
+            .defaultMinSize(minWidth = 44.dp, minHeight = 44.dp)
             .clip(RoundedCornerShape(50))
             .background(background.copy(alpha = 0.92f))
             .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
             .padding(horizontal = 8.dp, vertical = 3.dp),
+        contentAlignment = Alignment.Center,
     ) {
         Text(
             text = text,
@@ -627,7 +703,7 @@ private fun PageDots(
         repeat(3) { index ->
             Box(
                 modifier = Modifier
-                    .size(22.dp)
+                    .size(48.dp)
                     .clickable { onSelect(index) },
                 contentAlignment = Alignment.Center,
             ) {

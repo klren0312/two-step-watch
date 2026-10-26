@@ -100,4 +100,31 @@ class RouteStorageTest {
         assertFalse(storage.delete("../../important"))
         assertFalse(storage.delete("not-a-hash"))
     }
+
+    @Test
+    fun importRetainsWarningsForUsableGpx() {
+        File(importDirectory, "partial.gpx").writeText(
+            """
+            <gpx xmlns="http://www.topografix.com/GPX/1/1" version="1.1" creator="test">
+              <wpt lat="999" lon="117"><name>坏标注</name></wpt>
+              <trk><name>部分有效</name>
+                <trkseg>
+                  <trkpt lat="31.0" lon="117.0" />
+                  <trkpt lat="999" lon="117.0" />
+                  <trkpt lat="31.001" lon="117.001" />
+                </trkseg>
+                <trkseg><trkpt lat="31.0" lon="117.0" /></trkseg>
+              </trk>
+            </gpx>
+            """.trimIndent(),
+        )
+
+        val report = storage.importInbox(nowMillis = 1_000L)
+
+        assertEquals(listOf("部分有效"), report.imported)
+        assertEquals(
+            listOf("跳过 1 个无效轨迹点", "跳过 1 个不足两个点的轨迹分段", "跳过 1 个坐标无效的标注点"),
+            report.warnings,
+        )
+    }
 }

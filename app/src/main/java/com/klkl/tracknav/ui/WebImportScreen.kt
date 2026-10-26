@@ -23,6 +23,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.wear.compose.material3.Button
 import androidx.wear.compose.material3.MaterialTheme
 import androidx.wear.compose.material3.Text
@@ -43,17 +46,32 @@ fun WebImportScreen(
     var info by remember { mutableStateOf<WebImportInfo?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
 
-    DisposableEffect(Unit) {
-        val started = runCatching { server.start() }.getOrNull()
-        if (started == null) {
-            error = "无法启动本地服务"
-        } else if (started.port == 0) {
-            error = "端口被占用，无法启动服务"
-        } else {
-            info = started
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, server) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_START -> {
+                    val started = runCatching { server.start() }.getOrNull()
+                    info = started?.takeIf { it.port > 0 }
+                    error = when {
+                        started == null -> "无法启动本地服务"
+                        started.port == 0 -> "端口被占用，无法启动服务"
+                        else -> null
+                    }
+                    view.keepScreenOn = started?.port?.let { it > 0 } == true
+                }
+                Lifecycle.Event.ON_STOP -> {
+                    view.keepScreenOn = false
+                    server.stop()
+                    info = null
+                    error = null
+                }
+                else -> Unit
+            }
         }
-        view.keepScreenOn = true
+        lifecycleOwner.lifecycle.addObserver(observer)
         onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
             view.keepScreenOn = false
             server.stop()
         }

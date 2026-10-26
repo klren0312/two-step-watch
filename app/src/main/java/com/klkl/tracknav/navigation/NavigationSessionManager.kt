@@ -2,6 +2,7 @@ package com.klkl.tracknav.navigation
 
 import android.content.Context
 import android.os.PowerManager
+import android.os.SystemClock
 import android.util.Log
 import com.klkl.tracknav.data.SettingsStore
 import com.klkl.tracknav.domain.NamedWaypoint
@@ -40,6 +41,7 @@ sealed interface NavigationState {
         val satellites: GnssSatelliteInfo,
         val gpsEnabled: Boolean,
         val waitingSinceMillis: Long,
+        val fixAgeMillis: Long?,
     ) : NavigationState
 
     data class Active(
@@ -54,6 +56,8 @@ sealed interface NavigationState {
         val satellites: GnssSatelliteInfo,
         val gpsEnabled: Boolean,
         val banner: NavigationBanner?,
+        val fixAgeMillis: Long?,
+        val backgroundServiceFailed: Boolean = false,
     ) : NavigationState
 }
 
@@ -90,10 +94,19 @@ class NavigationSessionManager(
     private var recorder: TrackRecorder? = null
     private val externalRoot: File = context.getExternalFilesDir(null) ?: context.filesDir
     private var latestFix: LocationFix? = null
+    private var latestFixElapsedRealtimeMillis = 0L
     private var lowPowerMode = false
     private var latestHeading: HeadingReading? = null
     private var latestSatellites = GnssSatelliteInfo()
     private var latestGpsEnabled = false
+
+    init {
+        scope.launch {
+            settingsStore.settings.collect { settings ->
+                engine?.updateOffRouteThreshold(settings.offRouteThresholdMeters.toDouble())
+            }
+        }
+    }
 
     fun hasLocationPermission(): Boolean = tracker.hasPermission()
 
@@ -108,6 +121,7 @@ class NavigationSessionManager(
         preparedWaypoints = if (reverse) route.waypoints.reversed() else route.waypoints
         engine = null
         latestFix = null
+        latestFixElapsedRealtimeMillis = 0L
         latestHeading = null
         latestSatellites = GnssSatelliteInfo()
         latestGpsEnabled = false
@@ -122,6 +136,7 @@ class NavigationSessionManager(
             satellites = latestSatellites,
             gpsEnabled = false,
             waitingSinceMillis = System.currentTimeMillis(),
+            fixAgeMillis = null,
         )
 
         if (replay) {
@@ -129,6 +144,7 @@ class NavigationSessionManager(
             val now = System.currentTimeMillis()
             val fix = replayFix(path, progressMeters = 0.0, timeMillis = now, speedMps = 0.0)
             latestFix = fix
+            latestFixElapsedRealtimeMillis = SystemClock.elapsedRealtime()
             latestSatellites = GnssSatelliteInfo(visible = 12, usedInFix = 9)
             latestGpsEnabled = true
             val preparing = _state.value as? NavigationState.Preparing ?: return false
@@ -138,6 +154,7 @@ class NavigationSessionManager(
                 distanceToStartMeters = 0.0,
                 satellites = latestSatellites,
                 gpsEnabled = true,
+                fixAgeMillis = 0L,
             )
             return true
         }
@@ -157,13 +174,39 @@ class NavigationSessionManager(
             headingProvider.readings.collect { reading -> updateHeading(reading) }
         }
         tracker.start()
+        inputJobs += scope.launch {
+            while (true) {
+                delay(1_000L)
+                updateFixAge()
+            }
+        }
         return true
     }
 
     fun start(useNearest: Boolean): Boolean {
         val preparing = _state.value as? NavigationState.Preparing ?: return false
         val path = preparedPath ?: return false
-        val fix = latestFix ?: preparing.fix
+        val fix = (latestFix ?: preparing.fix)?.takeIf {
+            preparedReplay || (currentFixAgeMillis() ?: Long.MAX_VALUE) <= LOCATION_FIX_TIMEOUT_MILLIS
+        }
+        if (!preparedReplay && !NavigationForegroundService.start(context, preparing.route.name)) {
+            return false
+        }
+        val newRecorder = runCatching {
+            TrackRecorder(
+                recordingsDirectory = File(context.filesDir, "recordings"),
+                exportsDirectory = File(externalRoot, "exports"),
+                routeName = preparing.route.name,
+                sessionStartMillis = fix?.timeMillis ?: System.currentTimeMillis(),
+            )
+        }.getOrNull()
+        if (newRecorder == null) {
+            NavigationForegroundService.stop(context)
+            return false
+        }
+        recorder = newRecorder
+        fix?.let { newRecorder.addFix(it) }
+
         val hint = when {
             preparedReplay -> 0.0
             fix == null -> null
@@ -188,16 +231,6 @@ class NavigationSessionManager(
         } else {
             null
         }
-        recorder = runCatching {
-            TrackRecorder(
-                recordingsDirectory = File(context.filesDir, "recordings"),
-                exportsDirectory = File(externalRoot, "exports"),
-                routeName = preparing.route.name,
-                sessionStartMillis = fix?.timeMillis ?: System.currentTimeMillis(),
-            )
-        }.getOrNull()
-        fix?.let { recorder?.addFix(it) }
-        NavigationForegroundService.start(context, preparing.route.name)
         acquireWakeLock()
         Log.d(
             TAG,
@@ -215,6 +248,7 @@ class NavigationSessionManager(
             satellites = latestSatellites,
             gpsEnabled = latestGpsEnabled,
             banner = null,
+            fixAgeMillis = fix?.let { currentFixAgeMillis() },
         )
         update?.let { handleEvents(it.events) }
         if (preparedReplay) {
@@ -234,6 +268,7 @@ class NavigationSessionManager(
         preparedWaypoints = emptyList()
         engine = null
         latestFix = null
+        latestFixElapsedRealtimeMillis = 0L
         latestHeading = null
         latestSatellites = GnssSatelliteInfo()
         latestGpsEnabled = false
@@ -244,6 +279,12 @@ class NavigationSessionManager(
 
     fun cancelPreparation() {
         end()
+    }
+
+    fun onForegroundServiceFailed() {
+        val active = _state.value as? NavigationState.Active ?: return
+        _state.value = active.copy(backgroundServiceFailed = true)
+        showBanner("后台导航服务失败，请保持应用在前台", warning = true)
     }
 
     fun setLowPowerMode(enabled: Boolean) {
@@ -262,6 +303,8 @@ class NavigationSessionManager(
 
     private fun handleFix(fix: LocationFix) {
         latestFix = fix
+        latestFixElapsedRealtimeMillis = fix.elapsedRealtimeMillis.takeIf { it > 0L }
+            ?: SystemClock.elapsedRealtime()
         if (!preparedReplay) {
             headingProvider.updateLocation(fix)
         }
@@ -278,24 +321,41 @@ class NavigationSessionManager(
                     },
                     satellites = latestSatellites,
                     gpsEnabled = latestGpsEnabled,
+                    fixAgeMillis = currentFixAgeMillis(),
                 )
             }
 
             is NavigationState.Active -> {
                 recorder?.addFix(fix)
                 val update = engine?.onFix(fix) ?: return
-                handleEvents(update.events)
                 val heading = effectiveHeading(update.snapshot.progressMeters, fix)
-                current.copy(
+                _state.value = current.copy(
                     snapshot = update.snapshot,
                     fix = fix,
                     headingDegrees = heading,
                     satellites = latestSatellites,
                     gpsEnabled = latestGpsEnabled,
-                ).also { _state.value = it }
+                    fixAgeMillis = 0L,
+                )
+                handleEvents(update.events)
             }
 
             NavigationState.Idle -> Unit
+        }
+    }
+
+    private fun currentFixAgeMillis(): Long? = latestFix?.let {
+        (SystemClock.elapsedRealtime() - latestFixElapsedRealtimeMillis).coerceAtLeast(0L)
+    }
+
+    private fun updateFixAge() {
+        val age = currentFixAgeMillis() ?: return
+        _state.update { current ->
+            when (current) {
+                is NavigationState.Preparing -> current.copy(fixAgeMillis = age)
+                is NavigationState.Active -> current.copy(fixAgeMillis = age)
+                NavigationState.Idle -> current
+            }
         }
     }
 
@@ -413,14 +473,12 @@ class NavigationSessionManager(
                     .coerceAtMost(total)
                 val point = path.pointAt(progress) ?: break
                 val bearing = path.bearingAt(progress) ?: 0.0
-                val offset = when {
-                    progress <= offRouteStart -> 0.0
-                    progress < offRouteStart + offsetRampMeters ->
-                        maxOffsetMeters * (progress - offRouteStart) / offsetRampMeters
-                    progress < offRouteEnd - offsetRampMeters -> maxOffsetMeters
-                    progress < offRouteEnd ->
-                        maxOffsetMeters * (offRouteEnd - progress) / offsetRampMeters
-                    else -> 0.0
+                val offset = if (progress <= offRouteStart || progress >= offRouteEnd) {
+                    0.0
+                } else {
+                    val rampUp = ((progress - offRouteStart) / offsetRampMeters).coerceIn(0.0, 1.0)
+                    val rampDown = ((offRouteEnd - progress) / offsetRampMeters).coerceIn(0.0, 1.0)
+                    maxOffsetMeters * minOf(rampUp, rampDown)
                 }
                 val position = offsetPosition(
                     lat = point.lat,

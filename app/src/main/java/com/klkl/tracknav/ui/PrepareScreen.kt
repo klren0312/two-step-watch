@@ -21,6 +21,7 @@ import androidx.core.content.ContextCompat
 import androidx.wear.compose.material3.Button
 import androidx.wear.compose.material3.MaterialTheme
 import androidx.wear.compose.material3.Text
+import com.klkl.tracknav.navigation.LOCATION_FIX_TIMEOUT_MILLIS
 import com.klkl.tracknav.navigation.NavigationState
 import kotlinx.coroutines.delay
 import kotlin.math.roundToInt
@@ -67,8 +68,7 @@ fun PrepareScreen(
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
     ) { result ->
-        val granted = result[Manifest.permission.ACCESS_FINE_LOCATION] == true ||
-            result[Manifest.permission.ACCESS_COARSE_LOCATION] == true
+        val granted = result[Manifest.permission.ACCESS_FINE_LOCATION] == true
         if (granted) {
             permissionDenied = false
             viewModel.retryPreparation()
@@ -110,24 +110,29 @@ fun PrepareScreen(
 
     val waitedMillis = (nowMillis - preparing.waitingSinceMillis).coerceAtLeast(0L)
     val fix = preparing.fix
-    val accuracyGood = fix != null && fix.accuracyMeters <= 30f
+    val locationStale = fix != null &&
+        (preparing.fixAgeMillis ?: 0L) > LOCATION_FIX_TIMEOUT_MILLIS
+    val currentFix = fix.takeIf { !locationStale }
+    val accuracyGood = currentFix != null && currentFix.accuracyMeters <= 30f
     val timeAllows = waitedMillis >= 30_000L
     val canStart = preparing.replay ||
         (permissionGranted && (accuracyGood || timeAllows))
-    val distanceToStart = preparing.distanceToStartMeters
+    val distanceToStart = preparing.distanceToStartMeters.takeIf { currentFix != null }
     val promptNearest = distanceToStart != null && distanceToStart > 200.0
 
     val statusText = when {
         !preparing.replay && !permissionGranted -> "需要定位权限"
         !preparing.replay && !preparing.gpsEnabled -> "GPS 未开启"
         preparing.replay -> "模拟定位已就绪"
+        locationStale -> "定位中断 ${(preparing.fixAgeMillis ?: 0L) / 1_000L} 秒"
         fix == null -> "正在定位… 卫星 ${preparing.satellites.usedInFix}/${preparing.satellites.visible}"
         else -> "卫星 ${preparing.satellites.usedInFix}/${preparing.satellites.visible} · 精度 ±${fix.accuracyMeters.roundToInt()} m"
     }
 
     val detailText = when {
         preparing.replay -> "沿轨迹回放（约 1.5 分钟），并自动制造一次渐进偏航"
-        !preparing.replay && !permissionGranted -> "允许定位后才能开始真实导航"
+        !preparing.replay && !permissionGranted -> "真实导航需要精确定位权限；若只授予大致定位，请在系统设置中改为精确定位"
+        locationStale -> "定位数据已停止更新，可重新启动定位或等待后直接开始"
         fix == null && waitedMillis < 30_000L -> "首次定位可能需要 30–120 秒，请到开阔处"
         fix == null -> "仍无定位，可以直接开始，地图会等待首个定位"
         promptNearest -> "距轨迹起点 ${formatDistance(distanceToStart)}，建议从最近点切入"
@@ -137,7 +142,8 @@ fun PrepareScreen(
 
     val startLabel = when {
         !preparing.replay && !permissionGranted -> "等待授权…"
-        fix == null -> "等待定位…"
+        currentFix == null && timeAllows -> "无定位仍开始"
+        currentFix == null -> "等待定位…"
         !accuracyGood && !timeAllows -> "等待更准的定位…"
         !accuracyGood -> "仍然开始"
         else -> "开始导航"
@@ -168,6 +174,17 @@ fun PrepareScreen(
             )
         }
 
+        viewModel.message?.let { message ->
+            item {
+                Text(
+                    text = message,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    textAlign = TextAlign.Center,
+                )
+            }
+        }
+
         if (!preparing.replay && !permissionGranted) {
             item {
                 Button(
@@ -196,7 +213,9 @@ fun PrepareScreen(
             }
         }
 
-        if (!preparing.replay && permissionGranted && fix == null && waitedMillis >= 10_000L) {
+        if (!preparing.replay && permissionGranted &&
+            (currentFix == null) && waitedMillis >= 10_000L
+        ) {
             item {
                 Button(
                     onClick = viewModel::retryPreparation,

@@ -16,6 +16,7 @@ data class ImportReport(
     val imported: List<String> = emptyList(),
     val skipped: List<String> = emptyList(),
     val failed: List<ImportFailure> = emptyList(),
+    val warnings: List<String> = emptyList(),
 ) {
     val isEmptyInbox: Boolean
         get() = imported.isEmpty() && skipped.isEmpty() && failed.isEmpty()
@@ -61,43 +62,47 @@ class RouteStorage(
         val imported = mutableListOf<String>()
         val skipped = mutableListOf<String>()
         val failed = mutableListOf<ImportFailure>()
-
+        val warnings = mutableListOf<String>()
         for (file in files) {
-            try {
-                if (file.length() > MAX_GPX_BYTES) {
-                    failed += ImportFailure(file.name, "文件超过 20 MB")
-                    continue
-                }
-                val bytes = file.readBytes()
-                if (bytes.size > MAX_GPX_BYTES) {
-                    failed += ImportFailure(file.name, "文件超过 20 MB")
-                    continue
-                }
-
-                val id = sha256Hex(bytes)
-                val target = File(routesDirectory, "$id.route")
-                if (target.exists()) {
-                    skipped += file.name
-                    continue
-                }
-
-                val parsed = GpxParser.parse(ByteArrayInputStream(bytes), file.name)
-                val route = Route(
-                    id = id,
-                    name = parsed.name,
-                    segments = parsed.segments,
-                    waypoints = parsed.waypoints,
-                    importedAtMillis = nowMillis,
-                    sourceFileName = file.name,
-                )
-                writeRoute(route, target)
-                imported += route.name
-            } catch (exception: Exception) {
-                failed += ImportFailure(file.name, exception.message ?: "导入失败")
-            }
+            val report = importFile(file, nowMillis)
+            imported += report.imported
+            skipped += report.skipped
+            failed += report.failed
+            warnings += report.warnings
         }
+        return ImportReport(imported = imported, skipped = skipped, failed = failed, warnings = warnings)
+    }
 
-        return ImportReport(imported = imported, skipped = skipped, failed = failed)
+    internal fun importFile(file: File, nowMillis: Long): ImportReport {
+        try {
+            if (file.length() > MAX_GPX_BYTES) {
+                return ImportReport(failed = listOf(ImportFailure(file.name, "文件超过 20 MB")))
+            }
+            val bytes = file.readBytes()
+            if (bytes.size > MAX_GPX_BYTES) {
+                return ImportReport(failed = listOf(ImportFailure(file.name, "文件超过 20 MB")))
+            }
+
+            val id = sha256Hex(bytes)
+            val target = File(routesDirectory, "$id.route")
+            if (target.exists()) {
+                return ImportReport(skipped = listOf(file.name))
+            }
+
+            val parsed = GpxParser.parse(ByteArrayInputStream(bytes), file.name)
+            val route = Route(
+                id = id,
+                name = parsed.name,
+                segments = parsed.segments,
+                waypoints = parsed.waypoints,
+                importedAtMillis = nowMillis,
+                sourceFileName = file.name,
+            )
+            writeRoute(route, target)
+            return ImportReport(imported = listOf(route.name), warnings = parsed.warnings)
+        } catch (exception: Exception) {
+            return ImportReport(failed = listOf(ImportFailure(file.name, exception.message ?: "导入失败")))
+        }
     }
 
     fun delete(routeId: String): Boolean {

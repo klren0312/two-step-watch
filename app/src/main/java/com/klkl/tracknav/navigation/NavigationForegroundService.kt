@@ -73,11 +73,20 @@ class NavigationForegroundService : Service() {
             .setCategory(NotificationCompat.CATEGORY_NAVIGATION)
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
 
-        startForeground(
-            NOTIFICATION_ID,
-            notificationBuilder.build(),
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION,
-        )
+        val foregroundStarted = runCatching {
+            startForeground(
+                NOTIFICATION_ID,
+                notificationBuilder.build(),
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION,
+            )
+        }.onFailure { error ->
+            Log.w(TAG, "Unable to enter foreground: ${error.message}")
+        }.isSuccess
+        if (!foregroundStarted) {
+            (application as? TrackNavApplication)?.navigationManager?.onForegroundServiceFailed()
+            stopSelf()
+            return START_NOT_STICKY
+        }
 
         runCatching {
             OngoingActivity.Builder(this, NOTIFICATION_ID, notificationBuilder)
@@ -111,14 +120,14 @@ class NavigationForegroundService : Service() {
         private const val NOTIFICATION_ID = 1001
         private const val EXTRA_ROUTE_NAME = "route_name"
 
-        fun start(context: Context, routeName: String) {
+        fun start(context: Context, routeName: String): Boolean {
             val intent = Intent(context, NavigationForegroundService::class.java)
                 .putExtra(EXTRA_ROUTE_NAME, routeName)
-            runCatching {
+            return runCatching {
                 ContextCompat.startForegroundService(context, intent)
             }.onFailure { error ->
                 Log.w(TAG, "Unable to start navigation service: ${error.message}")
-            }
+            }.isSuccess
         }
 
         fun stop(context: Context) {

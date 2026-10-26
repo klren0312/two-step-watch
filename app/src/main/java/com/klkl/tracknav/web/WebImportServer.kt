@@ -45,28 +45,40 @@ class WebImportServer(private val repository: RouteRepository) {
         const val MAX_BODY_BYTES = MAX_GPX_BYTES + 1024 * 1024
     }
 
-    private val token = generateToken()
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var token = generateToken()
+    private var scope: CoroutineScope? = null
     private var serverSocket: ServerSocket? = null
     private var acceptJob: Job? = null
+    private val clientSockets = mutableSetOf<Socket>()
 
     fun start(): WebImportInfo {
+        if (serverSocket != null) return currentInfo()
+        token = generateToken()
         val socket = (DEFAULT_PORT..DEFAULT_PORT + 10).firstNotNullOfOrNull { port ->
             runCatching { ServerSocket(port) }.getOrNull()
         }
         if (socket == null) {
             return WebImportInfo(ip = findLanIp(), port = 0, token = token)
         }
+        val newScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        scope = newScope
         serverSocket = socket
-        acceptJob = scope.launch {
+        acceptJob = newScope.launch {
             while (isActive) {
                 val client = runCatching { socket.accept() }.getOrNull() ?: break
-                launch { client.use { handle(it) } }
+                synchronized(clientSockets) { clientSockets += client }
+                launch {
+                    try {
+                        client.use { handle(it) }
+                    } finally {
+                        synchronized(clientSockets) { clientSockets -= client }
+                    }
+                }
             }
         }
         val info = currentInfo()
         if (BuildConfig.DEBUG) {
-            Log.d(TAG, "web import url=${info.url ?: "no-lan-ip"} port=${info.port}")
+            runCatching { Log.d(TAG, "web import url=${info.url ?: "no-lan-ip"} port=${info.port}") }
         }
         return info
     }
@@ -82,7 +94,12 @@ class WebImportServer(private val repository: RouteRepository) {
         acceptJob = null
         runCatching { serverSocket?.close() }
         serverSocket = null
-        scope.cancel()
+        scope?.cancel()
+        scope = null
+        val clients = synchronized(clientSockets) {
+            clientSockets.toList().also { clientSockets.clear() }
+        }
+        clients.forEach { client -> runCatching { client.close() } }
     }
 
     private fun handle(client: Socket) {
@@ -239,6 +256,11 @@ class WebImportServer(private val repository: RouteRepository) {
         } else {
             ""
         }
+        val warningLine = if (report.warnings.isNotEmpty()) {
+            "<p class=\"warning\">警告 ${report.warnings.size} 条：${report.warnings.joinToString("；") { escapeHtml(it) }}</p>"
+        } else {
+            ""
+        }
         return """
             <!doctype html>
             <html lang="zh-CN">
@@ -254,6 +276,7 @@ class WebImportServer(private val repository: RouteRepository) {
                 p { line-height: 1.7; }
                 .hint { color: #9e9e9e; font-size: 13px; }
                 .error { color: #ffb74d; }
+                .warning { color: #ffb74d; }
                 a.button { display: inline-block; margin-top: 16px; padding: 12px 20px; border-radius: 999px;
                            background: #00e676; color: #00210d; font-weight: 700; text-decoration: none; }
               </style>
@@ -265,6 +288,7 @@ class WebImportServer(private val repository: RouteRepository) {
               $importedLine
               $skippedLine
               $failureLine
+              $warningLine
               <p class="hint">回到手表路线库查看新轨迹。</p>
               <a class="button" href="/$token/">继续上传</a>
             </main>

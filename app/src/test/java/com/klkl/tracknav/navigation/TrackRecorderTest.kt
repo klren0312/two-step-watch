@@ -67,6 +67,31 @@ class TrackRecorderTest {
     }
 
     @Test
+    fun recorderRejectsNonIncreasingTimestamps() {
+        val recordings = temporaryFolder.newFolder("recordings")
+        val exports = temporaryFolder.newFolder("exports")
+        val recorder = TrackRecorder(recordings, exports, "时间过滤", 1_700_000_000_000L)
+
+        recorder.addFix(fix(0.0, 0.0, 1_700_000_000_000L))
+        recorder.addFix(fix(0.0, 0.0001, 1_700_000_060_000L))
+        recorder.addFix(fix(0.0, 0.0100, 1_700_000_060_000L))
+        recorder.addFix(fix(0.0, 0.0200, 1_700_000_059_000L))
+        recorder.addFix(fix(0.0, 0.0002, 1_700_000_120_000L))
+
+        val summary = recorder.finish()
+        val exported = checkNotNull(summary.exportFile)
+        assertEquals(3, summary.pointCount)
+        assertTrue(summary.distanceMeters in 21.0..23.0)
+        assertEquals(1_700_000_120_000L, summary.endedAtMillis)
+
+        val parsed = exported.inputStream().use {
+            GpxParser.parse(it, exported.name)
+        }
+        assertEquals(3, parsed.segments.single().points.size)
+        assertEquals(0.0002, parsed.segments.single().points.last().lon, 1e-6)
+    }
+
+    @Test
     fun emptyRecordingIsDiscarded() {
         val recordings = temporaryFolder.newFolder("recordings")
         val exports = temporaryFolder.newFolder("exports")
@@ -79,7 +104,7 @@ class TrackRecorderTest {
     }
 
     @Test
-    fun recoveryFinalizesUnclosedPartFile() {
+    fun recoveryDropsIncompletePointAndFinalizesPartFile() {
         val recordings = temporaryFolder.newFolder("recordings")
         val exports = temporaryFolder.newFolder("exports")
         val part = File(recordings, "牛王寨蝴蝶线_20231114-221320.gpx.part")
@@ -89,6 +114,7 @@ class TrackRecorderTest {
                |<trk><name>牛王寨蝴蝶线</name><trkseg>
                |<trkpt lat="31.0" lon="117.0"><ele>100</ele><time>2023-11-14T22:13:20Z</time></trkpt>
                |<trkpt lat="31.001" lon="117.001"><ele>101</ele><time>2023-11-14T22:14:20Z</time></trkpt>
+               |<trkpt lat="31.002" lon="117.002">
             """.trimMargin(),
             Charsets.UTF_8,
         )
@@ -103,5 +129,55 @@ class TrackRecorderTest {
         }
         assertEquals("牛王寨蝴蝶线", parsed.name)
         assertEquals(2, parsed.segments.single().points.size)
+        assertEquals(31.001, parsed.segments.single().points.last().lat, 1e-6)
+    }
+
+    @Test
+    fun recoveryKeepsOriginalPartWhenValidationFails() {
+        val recordings = temporaryFolder.newFolder("recordings")
+        val exports = temporaryFolder.newFolder("exports")
+        val part = File(recordings, "损坏记录.gpx.part")
+        val original = """<gpx><trk><trkseg><trkpt lat="&invalid" lon="117.0"></trkpt>"""
+        part.writeText(original, Charsets.UTF_8)
+
+        val recovered = RecordRecovery.recover(recordings, exports)
+
+        assertTrue(recovered.isEmpty())
+        assertTrue(part.exists())
+        assertEquals(original, part.readText(Charsets.UTF_8))
+        assertTrue(exports.listFiles().isNullOrEmpty())
+    }
+
+    @Test
+    fun recoveryDiscardsEmptyPartFile() {
+        val recordings = temporaryFolder.newFolder("recordings")
+        val exports = temporaryFolder.newFolder("exports")
+        val part = File(recordings, "空轨迹.gpx.part")
+        part.writeText(
+            """<?xml version="1.0" encoding="UTF-8"?>
+               |<gpx xmlns="http://www.topografix.com/GPX/1/1" version="1.1" creator="TrackNav">
+               |<trk><name>空轨迹</name><trkseg>
+            """.trimMargin(),
+            Charsets.UTF_8,
+        )
+
+        val recovered = RecordRecovery.recover(recordings, exports)
+
+        assertTrue(recovered.isEmpty())
+        assertTrue(recordings.listFiles().isNullOrEmpty())
+        assertTrue(exports.listFiles().isNullOrEmpty())
+    }
+
+    @Test
+    fun recoverySkipsActiveRecording() {
+        val recordings = temporaryFolder.newFolder("recordings")
+        val exports = temporaryFolder.newFolder("exports")
+        val recorder = TrackRecorder(recordings, exports, "活动中", 1_700_000_000_000L)
+
+        val recovered = RecordRecovery.recover(recordings, exports)
+
+        assertTrue(recovered.isEmpty())
+        assertEquals(1, recordings.listFiles()!!.size)
+        recorder.finish()
     }
 }

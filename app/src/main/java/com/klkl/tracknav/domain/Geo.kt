@@ -10,6 +10,15 @@ import kotlin.math.sqrt
 
 private const val EARTH_RADIUS_METERS = 6_371_008.8
 
+fun normalizeLongitudeDelta(delta: Double): Double {
+    val wrapped = delta % 360.0
+    return when {
+        wrapped > 180.0 -> wrapped - 360.0
+        wrapped < -180.0 -> wrapped + 360.0
+        else -> wrapped
+    }
+}
+
 fun haversineMeters(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
     val phi1 = Math.toRadians(lat1)
     val phi2 = Math.toRadians(lat2)

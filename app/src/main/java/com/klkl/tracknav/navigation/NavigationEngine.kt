@@ -16,6 +16,7 @@ data class LocationFix(
     val speedMps: Float?,
     val bearingDegrees: Float?,
     val timeMillis: Long,
+    val elapsedRealtimeMillis: Long = 0L,
 )
 
 enum class NavigationEventType {
@@ -45,7 +46,7 @@ data class NavigationSnapshot(
     val elapsedMillis: Long = 0L,
     val currentElevationMeters: Double? = null,
     val remainingAscentMeters: Double? = null,
-    val arrivedWaypointNames: Set<String> = emptySet(),
+    val arrivedWaypointIndices: Set<Int> = emptySet(),
     val completed: Boolean = false,
 )
 
@@ -59,8 +60,8 @@ class NavigationEngine(
     private val waypoints: List<NamedWaypoint>,
     initialProgressHintMeters: Double? = null,
     private val suppressAlertsMillis: Long = 60_000L,
-    private val offRouteThresholdMeters: Double = 50.0,
-    private val offRouteClearMeters: Double = 30.0,
+    private var offRouteThresholdMeters: Double = 50.0,
+    private var offRouteClearMeters: Double = 30.0,
     private val offRouteSustainMillis: Long = 10_000L,
     private val offRouteRepeatMillis: Long = 60_000L,
     private val offRouteEscalationMeters: Double = 100.0,
@@ -86,11 +87,9 @@ class NavigationEngine(
     private var initialProgressHint = initialProgressHintMeters
     private var firstFixTimeMillis: Long? = null
     private var lastFixTimeMillis: Long? = null
-    private var lastFixLat: Double? = null
-    private var lastFixLon: Double? = null
     private var lastProgressMeters: Double? = null
     private var suppressUntilMillis: Long = 0L
-    private var rejoinCandidateFixes = 0
+    private var pendingRematch: PathMatch? = null
 
     private var offRouteSinceMillis: Long? = null
     private var lastOffRouteAlertMillis: Long? = null
@@ -98,7 +97,6 @@ class NavigationEngine(
     private var wasOffRoute = false
 
     private val arrivedWaypointIndices = mutableSetOf<Int>()
-    private val arrivedWaypointNames = mutableSetOf<String>()
     private val paceSamples = ArrayDeque<PaceSample>()
     private val progressSamples = ArrayDeque<ProgressSample>()
     private var lastWrongDirectionMillis: Long? = null
@@ -118,40 +116,51 @@ class NavigationEngine(
             suppressUntilMillis = now + suppressAlertsMillis
         }
 
-        val windowCenter = lastProgressMeters ?: initialProgressHint
-        val alreadyOffRoute = offRouteSinceMillis != null
-        val match = if (alreadyOffRoute) {
-            offRouteMatch(fix) ?: return NavigationUpdate(snapshot)
-        } else {
-            val forwardJumpGate = if (lastProgressMeters != null && previousTime != null) {
-                val elapsedSeconds = (now - previousTime) / 1_000.0
-                max(60.0, elapsedSeconds * 3.0 + 30.0)
-            } else {
-                null
-            }
+        val match = if (lastProgressMeters == null && initialProgressHint != null) {
             path.nearest(
                 lat = fix.lat,
                 lon = fix.lon,
-                windowCenterMeters = windowCenter,
+                windowCenterMeters = initialProgressHint,
                 windowRadiusMeters = 300.0,
-                preferenceDistanceMeters = windowCenter,
+                preferenceDistanceMeters = initialProgressHint,
                 preferencePenaltyPerMeter = 0.0,
-                maxForwardJumpMeters = forwardJumpGate,
-            ) ?: return NavigationUpdate(snapshot)
+            )
+        } else {
+            path.nearest(lat = fix.lat, lon = fix.lon)
+        } ?: run {
+            lastFixTimeMillis = now
+            snapshot = snapshot.copy(
+                accuracyMeters = fix.accuracyMeters,
+                elapsedMillis = now - (firstFixTimeMillis ?: now),
+            )
+            return NavigationUpdate(snapshot)
         }
-
         val lastProgress = lastProgressMeters
-        if (lastProgress != null && abs(match.alongMeters - lastProgress) > 500.0) {
-            val elapsed = now - (previousTime ?: now)
-            if (elapsed < 60_000L) {
-                lastFixTimeMillis = now
-                snapshot = snapshot.copy(
-                    accuracyMeters = fix.accuracyMeters,
-                    elapsedMillis = now - (firstFixTimeMillis ?: now),
-                )
-                return NavigationUpdate(snapshot)
-            }
+        val forwardJumpGate = if (lastProgress != null && previousTime != null) {
+            val elapsedSeconds = (now - previousTime) / 1_000.0
+            max(60.0, elapsedSeconds * 3.0 + 30.0)
+        } else {
+            null
         }
+        val withinGate = lastProgress == null || run {
+            val delta = match.alongMeters - lastProgress
+            delta >= -300.0 && (forwardJumpGate == null || delta <= forwardJumpGate)
+        }
+        val rematchConfirmed = pendingRematch?.let { pending ->
+            pending.segmentIndex == match.segmentIndex &&
+                abs(match.alongMeters - pending.alongMeters) <=
+                    (forwardJumpGate ?: 60.0)
+        } == true
+        if (!withinGate && !rematchConfirmed) {
+            pendingRematch = match
+            lastFixTimeMillis = now
+            snapshot = snapshot.copy(
+                accuracyMeters = fix.accuracyMeters,
+                elapsedMillis = now - (firstFixTimeMillis ?: now),
+            )
+            return NavigationUpdate(snapshot)
+        }
+        pendingRematch = null
 
         val events = mutableListOf<NavigationEvent>()
         val accuracyOk = fix.accuracyMeters in 0.01f..accuracyGateMeters
@@ -163,36 +172,42 @@ class NavigationEngine(
             if (crossTrack > offRouteThresholdMeters) {
                 if (offRouteSinceMillis == null) {
                     offRouteSinceMillis = now
-                    wasOffRoute = true
                 }
                 val since = offRouteSinceMillis ?: now
                 val repeatDue = lastOffRouteAlertMillis == null ||
                     now - lastOffRouteAlertMillis!! >= offRouteRepeatMillis ||
                     crossTrack >= lastOffRouteAlertDistance + offRouteEscalationMeters
-                if (now - since >= offRouteSustainMillis && now >= suppressUntilMillis && repeatDue) {
-                    events += NavigationEvent(
-                        type = NavigationEventType.OFF_ROUTE,
-                        message = "偏离轨迹 ${crossTrack.roundToInt()} 米",
-                    )
-                    lastOffRouteAlertMillis = now
-                    lastOffRouteAlertDistance = crossTrack
+                if (now - since >= offRouteSustainMillis) {
+                    wasOffRoute = true
+                    if (now >= suppressUntilMillis && repeatDue) {
+                        events += NavigationEvent(
+                            type = NavigationEventType.OFF_ROUTE,
+                            message = "偏离轨迹 ${crossTrack.roundToInt()} 米",
+                        )
+                        lastOffRouteAlertMillis = now
+                        lastOffRouteAlertDistance = crossTrack
+                    }
                 }
-            } else if (crossTrack < offRouteClearMeters) {
-                if (wasOffRoute) {
-                    events += NavigationEvent(
-                        type = NavigationEventType.BACK_ON_ROUTE,
-                        message = "已回到轨迹",
-                    )
+            } else {
+                if (!wasOffRoute) {
+                    offRouteSinceMillis = null
                 }
-                offRouteSinceMillis = null
-                lastOffRouteAlertMillis = null
-                lastOffRouteAlertDistance = 0.0
-                wasOffRoute = false
-                rejoinCandidateFixes = 0
+                if (crossTrack < offRouteClearMeters) {
+                    if (wasOffRoute) {
+                        events += NavigationEvent(
+                            type = NavigationEventType.BACK_ON_ROUTE,
+                            message = "已回到轨迹",
+                        )
+                    }
+                    offRouteSinceMillis = null
+                    lastOffRouteAlertMillis = null
+                    lastOffRouteAlertDistance = 0.0
+                    wasOffRoute = false
+                }
             }
         }
 
-        val offRoute = offRouteSinceMillis != null
+        val offRoute = wasOffRoute
 
         if (accuracyOk) {
             for ((index, waypoint) in waypoints.withIndex()) {
@@ -200,7 +215,6 @@ class NavigationEngine(
                 val distance = haversineMeters(fix.lat, fix.lon, waypoint.lat, waypoint.lon)
                 if (distance <= waypointRadiusMeters) {
                     arrivedWaypointIndices += index
-                    arrivedWaypointNames += waypoint.name
                     events += NavigationEvent(
                         type = NavigationEventType.WAYPOINT_ARRIVED,
                         message = "到达 ${waypoint.name}",
@@ -269,7 +283,10 @@ class NavigationEngine(
             null
         }
 
-        if (!completed && accuracyOk && remaining <= 25.0) {
+        val endPoint = path.segments.lastOrNull()?.points?.lastOrNull()
+        if (!completed && !offRoute && accuracyOk && remaining <= 25.0 &&
+            endPoint != null && haversineMeters(fix.lat, fix.lon, endPoint.lat, endPoint.lon) <= 25.0
+        ) {
             completed = true
             events += NavigationEvent(
                 type = NavigationEventType.ROUTE_COMPLETED,
@@ -278,8 +295,6 @@ class NavigationEngine(
         }
 
         lastFixTimeMillis = now
-        lastFixLat = fix.lat
-        lastFixLon = fix.lon
         lastProgressMeters = progress
         initialProgressHint = null
 
@@ -305,58 +320,14 @@ class NavigationEngine(
             elapsedMillis = elapsed,
             currentElevationMeters = fix.elevationMeters ?: match.elevationMeters,
             remainingAscentMeters = path.remainingAscentMeters(progress),
-            arrivedWaypointNames = arrivedWaypointNames.toSet(),
+            arrivedWaypointIndices = arrivedWaypointIndices.toSet(),
             completed = completed,
         )
         return NavigationUpdate(snapshot = snapshot, events = events)
     }
 
-    private fun offRouteMatch(fix: LocationFix): PathMatch? {
-        val progress = lastProgressMeters ?: return null
-        var candidateProgress = progress
-        val previousLat = lastFixLat
-        val previousLon = lastFixLon
-        val accuracyOk = fix.accuracyMeters in 0.01f..accuracyGateMeters
-        if (accuracyOk && previousLat != null && previousLon != null) {
-            val movement = haversineMeters(previousLat, previousLon, fix.lat, fix.lon)
-            if (movement >= 0.5) {
-                candidateProgress = (progress + movement.coerceAtMost(100.0))
-                    .coerceAtMost(path.totalMeters)
-            }
-        }
-        val routePoint = path.pointAt(candidateProgress) ?: return null
-        val deadReckoned = PathMatch(
-            lat = routePoint.lat,
-            lon = routePoint.lon,
-            elevationMeters = routePoint.elevationMeters,
-            alongMeters = candidateProgress,
-            crossTrackMeters = haversineMeters(
-                fix.lat,
-                fix.lon,
-                routePoint.lat,
-                routePoint.lon,
-            ),
-            segmentIndex = -1,
-            pointIndex = -1,
-        )
-        if (!accuracyOk) {
-            rejoinCandidateFixes = 0
-            return deadReckoned
-        }
-        val nearest = path.nearest(
-            lat = fix.lat,
-            lon = fix.lon,
-            windowCenterMeters = candidateProgress,
-            windowRadiusMeters = 300.0,
-        )
-        if (nearest != null && nearest.crossTrackMeters <= offRouteClearMeters) {
-            rejoinCandidateFixes++
-            if (rejoinCandidateFixes >= 2) {
-                return nearest
-            }
-        } else {
-            rejoinCandidateFixes = 0
-        }
-        return deadReckoned
+    fun updateOffRouteThreshold(thresholdMeters: Double) {
+        offRouteThresholdMeters = thresholdMeters
+        offRouteClearMeters = minOf(30.0, thresholdMeters * 0.6)
     }
 }

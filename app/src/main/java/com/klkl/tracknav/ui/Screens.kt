@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -25,6 +26,7 @@ import androidx.wear.compose.material3.Text
 import com.klkl.tracknav.BuildConfig
 import com.klkl.tracknav.domain.Route
 import com.klkl.tracknav.navigation.NavigationState
+import kotlinx.coroutines.delay
 
 @Composable
 internal fun WearScreen(
@@ -187,6 +189,12 @@ fun RouteDetailScreen(
     viewModel: RouteViewModel,
     route: Route,
 ) {
+    LaunchedEffect(viewModel.deleteArmed) {
+        if (viewModel.deleteArmed) {
+            delay(10_000L)
+            viewModel.resetDeleteConfirmation()
+        }
+    }
     WearScreen {
         item {
             Text(
@@ -491,7 +499,7 @@ fun SettingsScreen(viewModel: RouteViewModel) {
         }
         item {
             Text(
-                text = "版本 0.2.0",
+                text = "版本 ${BuildConfig.VERSION_NAME}",
                 style = MaterialTheme.typography.bodyExtraSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

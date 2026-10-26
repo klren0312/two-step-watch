@@ -24,11 +24,13 @@ import androidx.compose.ui.input.rotary.onRotaryScrollEvent
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.klkl.tracknav.domain.haversineMeters
+import com.klkl.tracknav.domain.normalizeLongitudeDelta
 import com.klkl.tracknav.navigation.NavigationState
 import com.klkl.tracknav.ui.theme.TrackGreen
 import com.klkl.tracknav.ui.theme.TrackOffRoute
 import com.klkl.tracknav.ui.theme.TrackTraveled
 import kotlin.math.cos
+import kotlin.math.hypot
 import kotlin.math.min
 import kotlin.math.sin
 
@@ -52,17 +54,22 @@ fun NavigationMap(
     val overviewMeters = remember(path) {
         var minLat = Double.MAX_VALUE
         var maxLat = -Double.MAX_VALUE
-        var minLon = Double.MAX_VALUE
-        var maxLon = -Double.MAX_VALUE
+        val referenceLon = path.segments.first().points.first().lon
+        var minLonOffset = Double.MAX_VALUE
+        var maxLonOffset = -Double.MAX_VALUE
         for (segment in path.segments) {
             for (point in segment.points) {
                 if (point.lat < minLat) minLat = point.lat
                 if (point.lat > maxLat) maxLat = point.lat
-                if (point.lon < minLon) minLon = point.lon
-                if (point.lon > maxLon) maxLon = point.lon
+                val lonOffset = normalizeLongitudeDelta(point.lon - referenceLon)
+                if (lonOffset < minLonOffset) minLonOffset = lonOffset
+                if (lonOffset > maxLonOffset) maxLonOffset = lonOffset
             }
         }
-        (haversineMeters(minLat, minLon, maxLat, maxLon) * 2.4).coerceAtLeast(200.0)
+        val eastMeters = (maxLonOffset - minLonOffset) * 111_320.0 *
+            cos(Math.toRadians((minLat + maxLat) / 2))
+        val northMeters = (maxLat - minLat) * 111_194.93
+        (hypot(eastMeters, northMeters) * 2.4).coerceAtLeast(200.0)
     }
 
     val labelPaint = remember {
@@ -113,7 +120,7 @@ fun NavigationMap(
         val height = size.height
 
         fun project(lat: Double, lon: Double): Offset {
-            val east = (lon - fix.lon) * 111_320.0 * cosLat
+            val east = normalizeLongitudeDelta(lon - fix.lon) * 111_320.0 * cosLat
             val north = (lat - fix.lat) * 111_194.93
             val x = (east * pxPerMeter).toFloat()
             val y = (-north * pxPerMeter).toFloat()

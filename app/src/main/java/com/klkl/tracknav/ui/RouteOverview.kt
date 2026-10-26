@@ -20,6 +20,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.unit.dp
 import androidx.wear.compose.material3.MaterialTheme
 import com.klkl.tracknav.domain.Route
+import com.klkl.tracknav.domain.normalizeLongitudeDelta
 import com.klkl.tracknav.ui.theme.TrackGreen
 import kotlin.math.cos
 import kotlin.math.min
@@ -27,8 +28,9 @@ import kotlin.math.min
 private data class RouteBounds(
     val minLat: Double,
     val maxLat: Double,
-    val minLon: Double,
-    val maxLon: Double,
+    val referenceLon: Double,
+    val minLonOffset: Double,
+    val maxLonOffset: Double,
     val midLat: Double,
 )
 
@@ -42,21 +44,24 @@ fun RouteOverview(
     val bounds = remember(route) {
         var minLat = Double.MAX_VALUE
         var maxLat = -Double.MAX_VALUE
-        var minLon = Double.MAX_VALUE
-        var maxLon = -Double.MAX_VALUE
+        val referenceLon = route.start.lon
+        var minLonOffset = Double.MAX_VALUE
+        var maxLonOffset = -Double.MAX_VALUE
         for (segment in route.segments) {
             for (point in segment.points) {
                 if (point.lat < minLat) minLat = point.lat
                 if (point.lat > maxLat) maxLat = point.lat
-                if (point.lon < minLon) minLon = point.lon
-                if (point.lon > maxLon) maxLon = point.lon
+                val lonOffset = normalizeLongitudeDelta(point.lon - referenceLon)
+                if (lonOffset < minLonOffset) minLonOffset = lonOffset
+                if (lonOffset > maxLonOffset) maxLonOffset = lonOffset
             }
         }
         RouteBounds(
             minLat = minLat,
             maxLat = maxLat,
-            minLon = minLon,
-            maxLon = maxLon,
+            referenceLon = referenceLon,
+            minLonOffset = minLonOffset,
+            maxLonOffset = maxLonOffset,
             midLat = (minLat + maxLat) / 2,
         )
     }
@@ -69,9 +74,9 @@ fun RouteOverview(
         Canvas(modifier = Modifier.fillMaxSize()) {
             val padding = 12.dp.toPx()
             val lonScale = cos(Math.toRadians(bounds.midLat))
-            val xRange = (bounds.maxLon - bounds.minLon) * lonScale
-            val yRange = bounds.maxLat - bounds.minLat
-            if (xRange <= 0.0 || yRange <= 0.0) return@Canvas
+            val xRange = ((bounds.maxLonOffset - bounds.minLonOffset) * lonScale)
+                .coerceAtLeast(0.000001)
+            val yRange = (bounds.maxLat - bounds.minLat).coerceAtLeast(0.000001)
 
             val availableWidth = (size.width - padding * 2).coerceAtLeast(1f)
             val availableHeight = (size.height - padding * 2).coerceAtLeast(1f)
@@ -80,7 +85,9 @@ fun RouteOverview(
             val offsetY = (size.height - yRange.toFloat() * scale) / 2f
 
             fun project(lat: Double, lon: Double): Offset = Offset(
-                x = offsetX + ((lon - bounds.minLon) * lonScale).toFloat() * scale,
+                x = offsetX + (
+                    (normalizeLongitudeDelta(lon - bounds.referenceLon) - bounds.minLonOffset) * lonScale
+                    ).toFloat() * scale,
                 y = offsetY + ((bounds.maxLat - lat)).toFloat() * scale,
             )
 

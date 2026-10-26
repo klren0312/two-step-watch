@@ -94,12 +94,11 @@ class RoutePath private constructor(val segments: List<PathSegment>) {
         var best: PathMatch? = null
         var bestScore = Double.MAX_VALUE
         for (edge in candidates) {
-            val ax = (edge.start.lon - lon) * cosLat * METERS_PER_DEGREE_LONGITUDE
+            val ax = normalizeLongitudeDelta(edge.start.lon - lon) * cosLat * METERS_PER_DEGREE_LONGITUDE
             val ay = (edge.start.lat - lat) * METERS_PER_DEGREE_LATITUDE
-            val bx = (edge.end.lon - lon) * cosLat * METERS_PER_DEGREE_LONGITUDE
-            val by = (edge.end.lat - lat) * METERS_PER_DEGREE_LATITUDE
-            val dx = bx - ax
-            val dy = by - ay
+            val longitudeDelta = normalizeLongitudeDelta(edge.end.lon - edge.start.lon)
+            val dx = longitudeDelta * cosLat * METERS_PER_DEGREE_LONGITUDE
+            val dy = (edge.end.lat - edge.start.lat) * METERS_PER_DEGREE_LATITUDE
             val lengthSquared = dx * dx + dy * dy
             val t = if (lengthSquared == 0.0) {
                 0.0
@@ -107,7 +106,7 @@ class RoutePath private constructor(val segments: List<PathSegment>) {
                 (-(ax * dx + ay * dy) / lengthSquared).coerceIn(0.0, 1.0)
             }
             val projectedLat = edge.start.lat + (edge.end.lat - edge.start.lat) * t
-            val projectedLon = edge.start.lon + (edge.end.lon - edge.start.lon) * t
+            val projectedLon = normalizeLongitude(edge.start.lon + longitudeDelta * t)
             val cross = haversineMeters(lat, lon, projectedLat, projectedLon)
             val along = edge.startDistanceMeters + edge.lengthMeters * t
             if (preferenceDistanceMeters != null) {
@@ -154,7 +153,9 @@ class RoutePath private constructor(val segments: List<PathSegment>) {
                         }
                         return PathPoint(
                             lat = start.lat + (end.lat - start.lat) * t,
-                            lon = start.lon + (end.lon - start.lon) * t,
+                            lon = normalizeLongitude(
+                                start.lon + normalizeLongitudeDelta(end.lon - start.lon) * t,
+                            ),
                             elevationMeters = interpolate(
                                 start.elevationMeters,
                                 end.elevationMeters,
@@ -253,6 +254,18 @@ class RoutePath private constructor(val segments: List<PathSegment>) {
         }
     }
 }
+
+private fun normalizeLongitudeDelta(delta: Double): Double {
+    val wrapped = delta % 360.0
+    return when {
+        wrapped > 180.0 -> wrapped - 360.0
+        wrapped < -180.0 -> wrapped + 360.0
+        else -> wrapped
+    }
+}
+
+private fun normalizeLongitude(lon: Double): Double =
+    ((lon + 180.0) % 360.0 + 360.0) % 360.0 - 180.0
 
 private fun interpolate(start: Double?, end: Double?, t: Double): Double? =
     if (start != null && end != null) start + (end - start) * t else start ?: end

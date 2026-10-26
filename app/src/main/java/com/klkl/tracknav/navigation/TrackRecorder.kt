@@ -8,6 +8,10 @@ import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
+import javax.xml.parsers.DocumentBuilderFactory
+
+private val activeRecordingFiles = ConcurrentHashMap.newKeySet<String>()
 
 data class RecordSummary(
     val exportFile: File?,
@@ -44,33 +48,40 @@ class TrackRecorder(
     private var endedAtMillis: Long? = null
 
     init {
-        if (!recordingsDirectory.exists() && !recordingsDirectory.mkdirs()) {
-            error("无法创建记录目录")
-        }
-        writer = recordingFile.bufferedWriter(Charsets.UTF_8).apply {
-            write(
-                """<?xml version="1.0" encoding="UTF-8"?>
-                    |<gpx xmlns="http://www.topografix.com/GPX/1/1" version="1.1" creator="TrackNav">
-                    |<metadata><name>${escapeXml(routeName)} 记录</name><time>${isoTime(sessionStartMillis)}</time></metadata>
-                    |<trk><name>${escapeXml(routeName)}</name><trkseg>
-                """.trimMargin(),
-            )
-            flush()
+        activeRecordingFiles += recordingFile.absolutePath
+        try {
+            if (!recordingsDirectory.exists() && !recordingsDirectory.mkdirs()) {
+                error("无法创建记录目录")
+            }
+            writer = recordingFile.bufferedWriter(Charsets.UTF_8).apply {
+                write(
+                    """<?xml version="1.0" encoding="UTF-8"?>
+                        |<gpx xmlns="http://www.topografix.com/GPX/1/1" version="1.1" creator="TrackNav">
+                        |<metadata><name>${escapeXml(routeName)} 记录</name><time>${isoTime(sessionStartMillis)}</time></metadata>
+                        |<trk><name>${escapeXml(routeName)}</name><trkseg>
+                    """.trimMargin(),
+                )
+                flush()
+            }
+        } catch (error: Throwable) {
+            activeRecordingFiles -= recordingFile.absolutePath
+            throw error
         }
     }
 
     fun addFix(fix: LocationFix) {
         if (finished || writer == null) return
         if (fix.accuracyMeters <= 0f || fix.accuracyMeters > 50f) return
+        val previousTime = lastAcceptedTimeMillis
+        if (previousTime != null && fix.timeMillis <= previousTime) return
 
         val previous = lastPoint
         if (previous != null) {
             val step = haversineMeters(previous.lat, previous.lon, fix.lat, fix.lon)
             if (step < 3.0) return
-            val previousTime = lastAcceptedTimeMillis
             if (previousTime != null) {
                 val seconds = (fix.timeMillis - previousTime) / 1_000.0
-                if (seconds > 0.0 && step / seconds > 30.0) return
+                if (step / seconds > 30.0) return
             }
             distanceMeters += step
         }
@@ -108,6 +119,7 @@ class TrackRecorder(
             close()
         }
         writer = null
+        activeRecordingFiles -= recordingFile.absolutePath
 
         if (pointCount == 0) {
             recordingFile.delete()
@@ -150,26 +162,50 @@ object RecordRecovery {
 
         val recovered = mutableListOf<File>()
         for (part in parts) {
+            if (part.absolutePath in activeRecordingFiles) continue
+            var target: File? = null
             runCatching {
                 val text = part.readText(Charsets.UTF_8)
-                if (!text.trimEnd().endsWith("</gpx>")) {
-                    part.appendText("</trkseg></trk></gpx>\n", Charsets.UTF_8)
+                val lastCompletePoint = text.lastIndexOf("</trkpt>")
+                if (lastCompletePoint < 0) {
+                    part.delete()
+                    return@runCatching
+                }
+                val recoveredText = if (text.trimEnd().endsWith("</gpx>")) {
+                    text
+                } else {
+                    text.substring(0, lastCompletePoint + "</trkpt>".length) +
+                        "</trkseg></trk></gpx>\n"
                 }
                 val base = part.name.removeSuffix(".part")
-                var target = File(exportsDirectory, base)
+                var output = File(exportsDirectory, base)
                 var suffix = 2
-                while (target.exists()) {
-                    target = File(exportsDirectory, "${base.removeSuffix(".gpx")}_$suffix.gpx")
+                while (output.exists()) {
+                    output = File(exportsDirectory, "${base.removeSuffix(".gpx")}_$suffix.gpx")
                     suffix++
                 }
-                part.copyTo(target, overwrite = false)
-                part.delete()
-                recovered += target
+                target = output
+                output.writeText(recoveredText, Charsets.UTF_8)
+                if (!isWellFormedXml(output) || !part.delete()) {
+                    output.delete()
+                    return@runCatching
+                }
+                recovered += output
+            }.onFailure {
+                target?.delete()
             }
         }
         return recovered
     }
 }
+
+private fun isWellFormedXml(file: File): Boolean = runCatching {
+    val factory = DocumentBuilderFactory.newInstance().apply {
+        isNamespaceAware = true
+    }
+    factory.newDocumentBuilder().parse(file)
+    true
+}.getOrDefault(false)
 
 private val fileTimestampFormatter: DateTimeFormatter =
     DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss", Locale.CHINA)

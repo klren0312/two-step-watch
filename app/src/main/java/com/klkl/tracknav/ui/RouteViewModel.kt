@@ -145,7 +145,7 @@ class RouteViewModel(
             message = null
             screen = Screen.Nav
         } else {
-            message = "无法开始导航"
+            message = "无法开始导航，请检查存储空间与后台定位权限"
         }
     }
 
@@ -211,6 +211,10 @@ class RouteViewModel(
         }
     }
 
+    fun resetDeleteConfirmation() {
+        deleteArmed = false
+    }
+
     fun dismissMessage() {
         message = null
     }
@@ -237,6 +241,9 @@ class RouteViewModel(
             if (report.failed.isNotEmpty()) {
                 val failure = report.failed.first()
                 add("失败 ${report.failed.size} 条：${failure.fileName}（${failure.message}）")
+            }
+            if (report.warnings.isNotEmpty()) {
+                add("警告：${report.warnings.joinToString("；")}")
             }
         }
         return parts.joinToString("；")

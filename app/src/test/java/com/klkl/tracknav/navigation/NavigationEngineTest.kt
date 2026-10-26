@@ -4,7 +4,9 @@ import com.klkl.tracknav.domain.NamedWaypoint
 import com.klkl.tracknav.domain.Route
 import com.klkl.tracknav.domain.RoutePoint
 import com.klkl.tracknav.domain.TrackSegment
+import kotlin.math.abs
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -106,12 +108,22 @@ class NavigationEngineTest {
     }
 
     @Test
+    fun offRouteThresholdCanChangeDuringNavigation() {
+        val engine = engine()
+        engine.onFix(fix(lat = 0.0, lon = 0.001, timeMillis = 0L))
+        engine.updateOffRouteThreshold(30.0)
+        engine.onFix(fix(lat = 0.0004, lon = 0.001, timeMillis = 1_000L))
+        val update = engine.onFix(fix(lat = 0.0004, lon = 0.001, timeMillis = 12_000L))
+
+        assertTrue(update.snapshot.offRoute)
+    }
+
+    @Test
     fun returningToTrackClearsOffRoute() {
         val engine = engine()
         engine.onFix(fix(lat = 0.001, lon = 0.001, timeMillis = 0L))
         engine.onFix(fix(lat = 0.001, lon = 0.00102, timeMillis = 11_000L))
-        engine.onFix(fix(lat = 0.0, lon = 0.00103, timeMillis = 12_000L))
-        val back = engine.onFix(fix(lat = 0.0, lon = 0.00104, timeMillis = 13_000L))
+        val back = engine.onFix(fix(lat = 0.0, lon = 0.00103, timeMillis = 12_000L))
 
         assertEquals(false, back.snapshot.offRoute)
         assertTrue(back.events.any { it.type == NavigationEventType.BACK_ON_ROUTE })
@@ -126,7 +138,26 @@ class NavigationEngineTest {
 
         assertEquals(1, first.events.count { it.type == NavigationEventType.WAYPOINT_ARRIVED })
         assertTrue(second.events.none { it.type == NavigationEventType.WAYPOINT_ARRIVED })
-        assertTrue(first.snapshot.arrivedWaypointNames.contains("登山起点"))
+        assertTrue(first.snapshot.arrivedWaypointIndices.contains(0))
+    }
+
+    @Test
+    fun duplicateWaypointNamesAreTrackedIndependently() {
+        val waypoints = listOf(
+            NamedWaypoint("路口", 0.0, 0.002),
+            NamedWaypoint("路口", 0.0, 0.008),
+        )
+        val engine = engine(waypoints = waypoints)
+        val first = engine.onFix(fix(lat = 0.0, lon = 0.002, timeMillis = 0L))
+        assertEquals(setOf(0), first.snapshot.arrivedWaypointIndices)
+
+        engine.onFix(fix(lat = 0.0, lon = 0.003, timeMillis = 60_000L))
+        engine.onFix(fix(lat = 0.0, lon = 0.004, timeMillis = 120_000L))
+        engine.onFix(fix(lat = 0.0, lon = 0.005, timeMillis = 180_000L))
+        engine.onFix(fix(lat = 0.0, lon = 0.006, timeMillis = 240_000L))
+        engine.onFix(fix(lat = 0.0, lon = 0.007, timeMillis = 300_000L))
+        val arrived = engine.onFix(fix(lat = 0.0, lon = 0.008, timeMillis = 360_000L))
+        assertEquals(setOf(0, 1), arrived.snapshot.arrivedWaypointIndices)
     }
 
     @Test
@@ -173,6 +204,97 @@ class NavigationEngineTest {
         val update = engine.onFix(fix(lat = 0.0, lon = 0.0095, timeMillis = 0L))
         assertTrue(update.snapshot.progressMeters < 1_010.0)
         assertTrue(update.snapshot.distanceToTrackMeters > 0.0)
+    }
+
+    @Test
+    fun disconnectedSegmentsDoNotAddGapDistanceAndRemainNavigable() {
+        val segmentedPath = RoutePath.fromSegments(
+            listOf(
+                listOf(
+                    RoutePoint(lat = 0.0, lon = 0.0, elevationMeters = null, timeMillis = null),
+                    RoutePoint(lat = 0.0, lon = 0.001, elevationMeters = null, timeMillis = null),
+                ),
+                listOf(
+                    RoutePoint(lat = 0.01, lon = 0.01, elevationMeters = null, timeMillis = null),
+                    RoutePoint(lat = 0.01, lon = 0.011, elevationMeters = null, timeMillis = null),
+                ),
+            ),
+        )
+
+        assertEquals(222.4, segmentedPath.totalMeters, 1.0)
+
+        assertEquals(0.0, segmentedPath.pointAt(50.0)!!.lat, 1e-6)
+        assertEquals(0.00045, segmentedPath.pointAt(50.0)!!.lon, 1e-4)
+        val nextSegment = segmentedPath.pointAt(150.0)!!
+        assertEquals(0.01, nextSegment.lat, 1e-6)
+        assertEquals(0.01025, nextSegment.lon, 1e-4)
+        assertEquals(150.0, nextSegment.distanceMeters, 0.01)
+    }
+
+    @Test
+    fun datelineProjectionUsesShortestLongitudeDelta() {
+        val datelinePath = RoutePath.fromSegments(
+            listOf(
+                listOf(
+                    RoutePoint(lat = 0.0, lon = 179.999, elevationMeters = null, timeMillis = null),
+                    RoutePoint(lat = 0.0, lon = -179.999, elevationMeters = null, timeMillis = null),
+                ),
+            ),
+        )
+
+        val midpoint = datelinePath.pointAt(datelinePath.totalMeters / 2)!!
+        assertEquals(180.0, abs(midpoint.lon), 1e-6)
+        val match = datelinePath.nearest(lat = 0.0, lon = 180.0)!!
+        assertEquals(111.2, match.alongMeters, 1.0)
+        assertEquals(0.0, match.crossTrackMeters, 0.1)
+        assertEquals(90.0, datelinePath.bearingAt(datelinePath.totalMeters / 2)!!, 0.5)
+    }
+
+    @Test
+    fun largeBacktrackAfterGapRequiresConsistentGlobalMatches() {
+        val engine = engine()
+        engine.onFix(fix(lat = 0.0, lon = 0.008, timeMillis = 0L))
+        val firstAtBacktrack = engine.onFix(fix(lat = 0.0, lon = 0.001, timeMillis = 120_000L))
+        val secondAtBacktrack = engine.onFix(fix(lat = 0.0, lon = 0.001, timeMillis = 121_000L))
+
+        assertTrue(firstAtBacktrack.snapshot.progressMeters > 800.0)
+        assertTrue(secondAtBacktrack.snapshot.progressMeters < 200.0)
+        assertEquals(0.001, secondAtBacktrack.snapshot.returnPoint!!.lon, 1e-6)
+    }
+
+    @Test
+    fun offRouteUsesRealNearestProjectionAfterJump() {
+        val engine = engine()
+        engine.onFix(fix(lat = 0.001, lon = 0.0, timeMillis = 0L))
+        engine.onFix(fix(lat = 0.001, lon = 0.0, timeMillis = 11_000L))
+        val firstJump = engine.onFix(fix(lat = 0.001, lon = 0.002, timeMillis = 12_000L))
+        val confirmedJump = engine.onFix(fix(lat = 0.001, lon = 0.002, timeMillis = 13_000L))
+
+        assertTrue(firstJump.snapshot.progressMeters < 100.0)
+        assertEquals(222.4, confirmedJump.snapshot.progressMeters, 1.0)
+        assertEquals(111.2, confirmedJump.snapshot.distanceToTrackMeters, 1.0)
+        assertEquals(0.002, confirmedJump.snapshot.returnPoint!!.lon, 1e-6)
+    }
+
+    @Test
+    fun briefExcursionDoesNotEnterOffRouteOrEmitBackOnRoute() {
+        val engine = engine()
+        engine.onFix(fix(lat = 0.0, lon = 0.0, timeMillis = 0L))
+        val excursion = engine.onFix(fix(lat = 0.001, lon = 0.0, timeMillis = 1_000L))
+        val returned = engine.onFix(fix(lat = 0.0, lon = 0.0, timeMillis = 2_000L))
+
+        assertFalse(excursion.snapshot.offRoute)
+        assertTrue(excursion.events.none { it.type == NavigationEventType.OFF_ROUTE })
+        assertTrue(returned.events.none { it.type == NavigationEventType.BACK_ON_ROUTE })
+    }
+
+    @Test
+    fun sideOfEndDoesNotCompleteRoute() {
+        val engine = engine()
+        val besideEnd = engine.onFix(fix(lat = 0.001, lon = 0.01, timeMillis = 0L))
+
+        assertFalse(besideEnd.snapshot.completed)
+        assertTrue(besideEnd.events.none { it.type == NavigationEventType.ROUTE_COMPLETED })
     }
 
     @Test
