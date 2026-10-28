@@ -7,6 +7,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
@@ -16,6 +17,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.style.TextAlign
 import androidx.core.content.ContextCompat
 import androidx.wear.compose.material3.Button
@@ -25,6 +27,8 @@ import com.klkl.tracknav.navigation.LOCATION_FIX_TIMEOUT_MILLIS
 import com.klkl.tracknav.navigation.NavigationState
 import kotlinx.coroutines.delay
 import kotlin.math.roundToInt
+
+private const val PREPARE_KEEP_SCREEN_ON_MAX_MILLIS = 120_000L
 
 @Composable
 fun PrepareScreen(
@@ -117,6 +121,21 @@ fun PrepareScreen(
     val timeAllows = waitedMillis >= 30_000L
     val canStart = preparing.replay ||
         (permissionGranted && (accuracyGood || timeAllows))
+
+    val keepScreenOnWhileLocating = !preparing.replay &&
+        permissionGranted &&
+        preparing.gpsEnabled &&
+        !accuracyGood &&
+        waitedMillis < PREPARE_KEEP_SCREEN_ON_MAX_MILLIS
+    val view = LocalView.current
+    DisposableEffect(keepScreenOnWhileLocating) {
+        view.keepScreenOn = keepScreenOnWhileLocating
+        onDispose {
+            if (viewModel.navigationState.value !is NavigationState.Active) {
+                view.keepScreenOn = false
+            }
+        }
+    }
     val distanceToStart = preparing.distanceToStartMeters.takeIf { currentFix != null }
     val promptNearest = distanceToStart != null && distanceToStart > 200.0
 
@@ -132,8 +151,9 @@ fun PrepareScreen(
     val detailText = when {
         preparing.replay -> "沿轨迹回放（约 1.5 分钟），并自动制造一次渐进偏航"
         !preparing.replay && !permissionGranted -> "真实导航需要精确定位权限；若只授予大致定位，请在系统设置中改为精确定位"
-        locationStale -> "定位数据已停止更新，可重新启动定位或等待后直接开始"
-        fix == null && waitedMillis < 30_000L -> "首次定位可能需要 30–120 秒，请到开阔处"
+        !preparing.replay && !preparing.gpsEnabled -> "请先在系统设置中开启定位，恢复后会自动搜星"
+        locationStale -> "定位数据已停止更新，正在自动重连；也可手动重新启动"
+        fix == null && waitedMillis < 30_000L -> "首次定位可能需要 30–120 秒，请到开阔处；期间屏幕保持亮起"
         fix == null -> "仍无定位，可以直接开始，地图会等待首个定位"
         promptNearest -> "距轨迹起点 ${formatDistance(distanceToStart)}，建议从最近点切入"
         distanceToStart != null -> "距轨迹起点 ${formatDistance(distanceToStart)}"
@@ -214,11 +234,11 @@ fun PrepareScreen(
         }
 
         if (!preparing.replay && permissionGranted &&
-            (currentFix == null) && waitedMillis >= 10_000L
+            (currentFix == null || locationStale) && waitedMillis >= 10_000L
         ) {
             item {
                 Button(
-                    onClick = viewModel::retryPreparation,
+                    onClick = viewModel::restartLocation,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Text("重新启动定位")

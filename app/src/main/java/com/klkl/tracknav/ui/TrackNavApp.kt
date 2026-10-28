@@ -21,7 +21,11 @@ import com.klkl.tracknav.TrackNavApplication
 import com.klkl.tracknav.navigation.NavigationState
 
 @Composable
-fun TrackNavApp(ambient: Boolean = false) {
+fun TrackNavApp(
+    ambient: Boolean = false,
+    lowBitAmbient: Boolean = false,
+    burnInProtectionRequired: Boolean = false,
+) {
     val context = LocalContext.current
     val application = context.applicationContext as TrackNavApplication
     val viewModel: RouteViewModel = viewModel(
@@ -133,7 +137,11 @@ fun TrackNavApp(ambient: Boolean = false) {
                 }
             } else {
                 if (ambient) {
-                    AmbientNavigationScreen(active = active)
+                    AmbientNavigationScreen(
+                        active = active,
+                        lowBitAmbient = lowBitAmbient,
+                        burnInProtectionRequired = burnInProtectionRequired,
+                    )
                 } else {
                     ActiveNavigationScreen(
                         viewModel = viewModel,

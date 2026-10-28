@@ -301,6 +301,8 @@ class NavigationSessionManager(
         }
     }
 
+    fun restartLocationTracking(): Boolean = tracker.restart()
+
     private fun handleFix(fix: LocationFix) {
         latestFix = fix
         latestFixElapsedRealtimeMillis = fix.elapsedRealtimeMillis.takeIf { it > 0L }

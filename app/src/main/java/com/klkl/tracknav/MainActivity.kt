@@ -14,11 +14,19 @@ import com.klkl.tracknav.ui.theme.TrackNavTheme
 class MainActivity : ComponentActivity() {
 
     private var ambient by mutableStateOf(false)
+    private var lowBitAmbient by mutableStateOf(false)
+    private var burnInProtectionRequired by mutableStateOf(false)
 
     private val ambientCallbacks = object : AmbientLifecycleObserver.AmbientLifecycleCallback {
         override fun onEnterAmbient(ambientDetails: AmbientLifecycleObserver.AmbientDetails) {
-            Log.d("MainActivity", "ambient enter")
+            Log.d(
+                "MainActivity",
+                "ambient enter lowBit=${ambientDetails.deviceHasLowBitAmbient} " +
+                    "burnIn=${ambientDetails.burnInProtectionRequired}",
+            )
             ambient = true
+            lowBitAmbient = ambientDetails.deviceHasLowBitAmbient
+            burnInProtectionRequired = ambientDetails.burnInProtectionRequired
             (application as? TrackNavApplication)?.navigationManager?.setLowPowerMode(true)
         }
 
@@ -29,6 +37,8 @@ class MainActivity : ComponentActivity() {
         override fun onExitAmbient() {
             Log.d("MainActivity", "ambient exit")
             ambient = false
+            lowBitAmbient = false
+            burnInProtectionRequired = false
             (application as? TrackNavApplication)?.navigationManager?.setLowPowerMode(false)
         }
     }
@@ -42,7 +52,11 @@ class MainActivity : ComponentActivity() {
         lifecycle.addObserver(ambientObserver)
         setContent {
             TrackNavTheme {
-                TrackNavApp(ambient = ambient)
+                TrackNavApp(
+                    ambient = ambient,
+                    lowBitAmbient = lowBitAmbient,
+                    burnInProtectionRequired = burnInProtectionRequired,
+                )
             }
         }
     }

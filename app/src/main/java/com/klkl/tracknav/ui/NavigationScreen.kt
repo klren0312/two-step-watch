@@ -1,5 +1,6 @@
 package com.klkl.tracknav.ui
 
+import android.os.SystemClock
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -7,6 +8,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.defaultMinSize
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -31,9 +33,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.wear.compose.foundation.lazy.ScalingLazyColumn
 import androidx.wear.compose.foundation.lazy.rememberScalingLazyListState
@@ -43,6 +49,7 @@ import androidx.wear.compose.material3.Button
 import androidx.wear.compose.material3.MaterialTheme
 import androidx.wear.compose.material3.ScreenScaffold
 import androidx.wear.compose.material3.Text
+import com.klkl.tracknav.domain.NamedWaypoint
 import com.klkl.tracknav.domain.bearingDegrees
 import com.klkl.tracknav.domain.haversineMeters
 import com.klkl.tracknav.navigation.LOCATION_FIX_TIMEOUT_MILLIS
@@ -110,6 +117,7 @@ fun ActiveNavigationScreen(
                     },
                     onToggleOverview = { overview = !overview },
                     onFinishNavigation = viewModel::finishNavigation,
+                    onRestartLocation = viewModel::restartLocation,
                     onScaleClick = {
                         if (overview) {
                             overview = false
@@ -156,8 +164,19 @@ fun ActiveNavigationScreen(
     }
 }
 
+private val AMBIENT_BURN_IN_OFFSETS = listOf(
+    0 to 0,
+    3 to -2,
+    -3 to 2,
+    2 to 3,
+)
+
 @Composable
-fun AmbientNavigationScreen(active: NavigationState.Active?) {
+fun AmbientNavigationScreen(
+    active: NavigationState.Active?,
+    lowBitAmbient: Boolean,
+    burnInProtectionRequired: Boolean,
+) {
     if (active == null) {
         Box(
             modifier = Modifier
@@ -169,57 +188,179 @@ fun AmbientNavigationScreen(active: NavigationState.Active?) {
         }
         return
     }
+
+    val fix = active.fix
     val snapshot = active.snapshot
+    val stale = fix != null &&
+        (active.fixAgeMillis ?: 0L) > LOCATION_FIX_TIMEOUT_MILLIS
+    val gpsOff = !active.gpsEnabled
+    val completed = snapshot?.completed == true
+    val nextWaypoint = active.waypoints.indices
+        .firstOrNull { it !in (snapshot?.arrivedWaypointIndices ?: emptySet()) }
+        ?.let { active.waypoints[it] }
+    val remainingMeters = snapshot?.remainingMeters ?: active.path.totalMeters
+    val secondaryColor = if (lowBitAmbient) Color.White else Color(0xFFB0B0B0)
+    val offsetIndex = if (burnInProtectionRequired) {
+        ((SystemClock.elapsedRealtime() / 60_000L) % AMBIENT_BURN_IN_OFFSETS.size).toInt()
+    } else {
+        0
+    }
+    val offset = AMBIENT_BURN_IN_OFFSETS[offsetIndex]
+    val arrowDegrees = if (!gpsOff && !stale && !completed && fix != null &&
+        snapshot?.offRoute == true && snapshot.returnPoint != null
+    ) {
+        val routeBearing = active.path.bearingAt(snapshot.progressMeters) ?: 0.0
+        normalizeBearingDelta(
+            bearingDegrees(
+                fix.lat,
+                fix.lon,
+                snapshot.returnPoint.lat,
+                snapshot.returnPoint.lon,
+            ) - routeBearing,
+        )
+    } else {
+        0f
+    }
+    val statusText = when {
+        active.backgroundServiceFailed -> "后台服务失败"
+        gpsOff -> "请开启系统定位"
+        fix == null -> "等待卫星信号"
+        stale -> "${(active.fixAgeMillis ?: 0L) / 1_000L} 秒未更新"
+        completed -> "导航完成"
+        snapshot?.offRoute == true ->
+            "偏离 ${snapshot.distanceToTrackMeters.roundToInt()} m · 回到轨迹"
+        nextWaypoint != null -> ambientWaypointText(active, nextWaypoint)
+        else -> "沿轨迹前进"
+    }
+    val statusWarning = active.backgroundServiceFailed || gpsOff || fix == null ||
+        stale || snapshot?.offRoute == true
+
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black),
+        contentAlignment = Alignment.Center,
     ) {
-        NavigationMap(
-            active = active,
-            headingUp = false,
-            overview = false,
-            zoomIndex = 2,
-            isCurrentPage = false,
-            onZoomStep = {},
-            onToggleOverview = {},
-            modifier = Modifier.fillMaxSize(),
-        )
         Column(
             modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .padding(start = 12.dp, end = 12.dp, bottom = 16.dp)
-                .clip(RoundedCornerShape(14.dp))
-                .background(Color.Black.copy(alpha = 0.6f))
-                .padding(horizontal = 12.dp, vertical = 6.dp),
+                .offset(x = offset.first.dp, y = offset.second.dp)
+                .padding(horizontal = 20.dp, vertical = 12.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Text(
-                text = formatDistance(snapshot?.remainingMeters ?: active.path.totalMeters),
-                style = MaterialTheme.typography.titleLarge,
-                color = MaterialTheme.colorScheme.primary,
+                text = active.route.name,
+                style = MaterialTheme.typography.bodyExtraSmall,
+                color = secondaryColor,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                textAlign = TextAlign.Center,
             )
-            if (active.backgroundServiceFailed) {
-                Text(
-                    text = "后台服务失败",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error,
+            Spacer(modifier = Modifier.height(6.dp))
+
+            when {
+                fix == null -> {
+                    Text(
+                        text = if (gpsOff) "GPS 未开启" else "定位中…",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = Color.White,
+                    )
+                    if (!gpsOff) {
+                        Text(
+                            text = "卫星 ${active.satellites.usedInFix}/" +
+                                active.satellites.visible,
+                            style = MaterialTheme.typography.bodyExtraSmall,
+                            color = secondaryColor,
+                        )
+                    }
+                }
+
+                gpsOff -> Text(
+                    text = "GPS 未开启",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = Color.White,
                 )
-            } else if ((active.fixAgeMillis ?: 0L) > LOCATION_FIX_TIMEOUT_MILLIS) {
-                Text(
-                    text = "定位中断 ${(active.fixAgeMillis ?: 0L) / 1_000L} 秒",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error,
+
+                stale -> Text(
+                    text = "定位中断",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = Color.White,
                 )
-            } else if (snapshot?.offRoute == true) {
-                Text(
-                    text = "偏离 ${snapshot.distanceToTrackMeters.roundToInt()} m",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error,
+
+                completed -> Text(
+                    text = "已到达终点",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = Color.White,
                 )
+
+                else -> AmbientDirectionArrow(degrees = arrowDegrees)
             }
+
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                text = formatDistance(remainingMeters),
+                style = MaterialTheme.typography.displaySmall,
+                color = Color.White,
+                maxLines = 1,
+            )
+            Text(
+                text = if (fix == null) "全程距离" else "剩余距离",
+                style = MaterialTheme.typography.bodyExtraSmall,
+                color = secondaryColor,
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = statusText,
+                style = MaterialTheme.typography.bodySmall,
+                color = if (statusWarning) Color.White else secondaryColor,
+                textAlign = TextAlign.Center,
+                maxLines = 2,
+            )
         }
     }
+}
+
+@Composable
+private fun AmbientDirectionArrow(degrees: Float) {
+    Canvas(modifier = Modifier.size(58.dp)) {
+        rotate(degrees) {
+            val path = Path().apply {
+                moveTo(size.width * 0.18f, size.height * 0.72f)
+                lineTo(size.width * 0.5f, size.height * 0.22f)
+                lineTo(size.width * 0.82f, size.height * 0.72f)
+            }
+            drawPath(
+                path = path,
+                color = Color.White,
+                style = Stroke(
+                    width = 4.dp.toPx(),
+                    cap = StrokeCap.Round,
+                    join = StrokeJoin.Round,
+                ),
+            )
+        }
+    }
+}
+
+private fun ambientWaypointText(
+    active: NavigationState.Active,
+    waypoint: NamedWaypoint,
+): String {
+    val distanceMeters = active.fix?.let {
+        haversineMeters(it.lat, it.lon, waypoint.lat, waypoint.lon)
+    }
+    val name = waypoint.name.ifBlank { "标注点" }
+    return if (distanceMeters != null) {
+        "$name · ${formatDistance(distanceMeters)}"
+    } else {
+        name
+    }
+}
+
+internal fun normalizeBearingDelta(degrees: Double): Float {
+    var delta = degrees % 360.0
+    if (delta > 180.0) delta -= 360.0
+    if (delta < -180.0) delta += 360.0
+    return delta.toFloat()
 }
 
 @Composable
@@ -233,6 +374,7 @@ private fun NavigationMapPage(
     onZoomStep: (Int) -> Unit,
     onToggleOverview: () -> Unit,
     onFinishNavigation: () -> Unit,
+    onRestartLocation: () -> Unit,
     onScaleClick: () -> Unit,
 ) {
     val snapshot = active.snapshot
@@ -313,24 +455,30 @@ private fun NavigationMapPage(
         }
 
         if (fix == null || locationStale) {
-            Text(
-                text = if (locationStale) {
-                    "定位中断 ${(active.fixAgeMillis ?: 0L) / 1_000L} 秒"
-                } else {
-                    "等待定位…"
-                },
-                style = MaterialTheme.typography.titleSmall,
-                color = if (locationStale) {
-                    MaterialTheme.colorScheme.error
-                } else {
-                    MaterialTheme.colorScheme.onSurfaceVariant
-                },
-                textAlign = TextAlign.Center,
+            Column(
                 modifier = Modifier
                     .align(Alignment.Center)
                     .background(Color.Black.copy(alpha = 0.7f))
                     .padding(8.dp),
-            )
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Text(
+                    text = if (locationStale) {
+                        "定位中断 ${(active.fixAgeMillis ?: 0L) / 1_000L} 秒\n正在自动重连…"
+                    } else {
+                        "等待定位…"
+                    },
+                    style = MaterialTheme.typography.titleSmall,
+                    color = if (locationStale) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                    textAlign = TextAlign.Center,
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Pill(text = "立即重连", onClick = onRestartLocation)
+            }
         }
 
         Column(

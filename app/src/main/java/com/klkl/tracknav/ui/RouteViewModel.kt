@@ -140,6 +140,14 @@ class RouteViewModel(
         )
     }
 
+    fun restartLocation() {
+        message = if (navigationManager.restartLocationTracking()) {
+            null
+        } else {
+            "无法重新启动定位，请检查定位权限"
+        }
+    }
+
     fun startPreparedNavigation(useNearest: Boolean) {
         if (navigationManager.start(useNearest)) {
             message = null
