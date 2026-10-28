@@ -21,21 +21,39 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 
+/** 可见卫星数与参与定位的卫星数，用于准备页显示搜星状态。 */
 data class GnssSatelliteInfo(
     val visible: Int = 0,
     val usedInFix: Int = 0,
 )
 
+/** 超过该时长没有新定位，就视为本次定位超时（准备页可允许仍用旧点出发）。 */
 internal const val LOCATION_FIX_TIMEOUT_MILLIS = 10_000L
+/** 无定位持续该时长后开始尝试恢复。 */
 internal const val LOCATION_RECOVERY_AFTER_MILLIS = 15_000L
+/** 两次重新注册定位监听的最小间隔，防止频繁重注。 */
 internal const val LOCATION_REREGISTER_INTERVAL_MILLIS = 10_000L
+/** 无定位持续该时长后升级为完整重启（注销+重注 GNSS 状态回调）。 */
 internal const val LOCATION_FULL_RESTART_INTERVAL_MILLIS = 60_000L
+/** 看门狗轮询间隔。 */
 private const val RECOVERY_TICK_MILLIS = 5_000L
+/** 系统缓存的上次定位只在该时间内使用，避免把几十分钟前的点当成当前位置。 */
 private const val LAST_KNOWN_MAX_AGE_MILLIS = 30_000L
 private const val TAG = "LocationTracker"
 
+/** 看门狗可采取的恢复动作，按侵入程度递增。 */
 internal enum class LocationRecoveryAction { NONE, REREGISTER, FULL_RESTART }
 
+/**
+ * 根据“距上次定位/上次注册/上次完整重启”的时长，决定本轮恢复动作。
+ *
+ * 抽成纯函数以便单测：不依赖 Android 时钟，所有时间由调用方传入。
+ *
+ * @param nowElapsedMillis 当前单调时钟（SystemClock.elapsedRealtime）
+ * @param lastFixElapsedMillis 最后一次收到定位的时刻
+ * @param lastRegisterElapsedMillis 最后一次注册监听的时刻
+ * @param lastFullRestartElapsedMillis 最后一次完整重启的时刻
+ */
 internal fun locationRecoveryAction(
     nowElapsedMillis: Long,
     lastFixElapsedMillis: Long,
@@ -58,6 +76,12 @@ internal fun locationRecoveryAction(
     }
 }
 
+/**
+ * GNSS 定位采集器：封装 LocationManager 与卫星状态，并对“定位静默”做自动恢复。
+ *
+ * 手表在户外/低温/后台时容易丢定位，所以除了注册监听，还跑一个 5 s 周期的看门狗：
+ * 静默 15 s 重新注册，静默 60 s 完整重启。所有恢复动作都只重建监听，不清空已积累的状态。
+ */
 class LocationTracker(private val context: Context) {
 
     private val locationManager: LocationManager? =
@@ -69,6 +93,7 @@ class LocationTracker(private val context: Context) {
         extraBufferCapacity = 16,
         onBufferOverflow = BufferOverflow.DROP_OLDEST,
     )
+    /** 定位流；缓冲 16 条、溢出丢弃最旧，避免界面卡顿时阻塞采集。 */
     val fixes: SharedFlow<LocationFix> = _fixes.asSharedFlow()
 
     private val _satellites = MutableStateFlow(GnssSatelliteInfo())
@@ -89,6 +114,7 @@ class LocationTracker(private val context: Context) {
             emit(location)
         }
 
+        // 用户在系统设置里重新打开定位时，自动补注册监听与卫星回调。
         override fun onProviderEnabled(provider: String) {
             if (provider != LocationManager.GPS_PROVIDER) return
             _gpsEnabled.value = isLocationEnabled()
@@ -118,6 +144,7 @@ class LocationTracker(private val context: Context) {
         }
     }
 
+    /** 看门狗：定期检查定位是否静默，并按 locationRecoveryAction 决定恢复方式。 */
     private val recoveryWatchdog = object : Runnable {
         override fun run() {
             if (!running) return
@@ -154,6 +181,11 @@ class LocationTracker(private val context: Context) {
             PackageManager.PERMISSION_GRANTED
 
     @SuppressLint("MissingPermission")
+    /**
+     * 开始采集：注册定位与卫星回调，启动看门狗，并补发一条足够新的系统缓存定位。
+     *
+     * @return 无权限或无 LocationManager 时返回 false
+     */
     fun start(): Boolean {
         if (!hasPermission()) return false
         val manager = locationManager ?: return false
@@ -175,6 +207,7 @@ class LocationTracker(private val context: Context) {
     }
 
     @SuppressLint("MissingPermission")
+    /** 用户手动点“重新定位”：直接做一次完整重启，并把计时重置。 */
     fun restart(): Boolean {
         if (!running) return start()
         if (!hasPermission()) return false
@@ -185,6 +218,7 @@ class LocationTracker(private val context: Context) {
         return true
     }
 
+    /** 判断缓存定位是否足够新；部分设备 elapsedRealtimeNanos 为 0，回退用墙钟比较。 */
     private fun isFresh(location: Location): Boolean {
         val elapsedNanos = location.elapsedRealtimeNanos
         val ageMillis = if (elapsedNanos > 0L) {
@@ -198,6 +232,7 @@ class LocationTracker(private val context: Context) {
     fun stop() {
         mainHandler.removeCallbacks(recoveryWatchdog)
         if (!running) {
+            // 未运行时也要清掉可能残留的卫星回调。
             unregisterGnssStatus()
             return
         }
@@ -211,6 +246,11 @@ class LocationTracker(private val context: Context) {
         lastFullRestartElapsedMillis = 0L
     }
 
+    /**
+     * 调整定位间隔（毫秒）。低功耗模式用 5 s，正常导航用 1 s。
+     *
+     * 仅在运行中才立即重注册，否则只记录值，下次 start 生效。
+     */
     fun setTrackingInterval(minTimeMillis: Long) {
         val newInterval = minTimeMillis.coerceAtLeast(1_000L)
         if (newInterval == intervalMillis) return
@@ -237,6 +277,7 @@ class LocationTracker(private val context: Context) {
         }
     }
 
+    /** 注册卫星状态回调；已注册或系统不支持时静默返回。 */
     private fun registerGnssStatus() {
         val manager = locationManager ?: return
         if (gnssRegistered) return
@@ -258,6 +299,7 @@ class LocationTracker(private val context: Context) {
         gnssRegistered = false
     }
 
+    /** 完整重启：注销监听与卫星回调后重新注册，并记录重启时刻。 */
     private fun fullRestart(now: Long) {
         Log.w(
             TAG,
@@ -283,6 +325,7 @@ class LocationTracker(private val context: Context) {
     }
 
     private fun emit(location: Location) {
+        // 非法坐标直接丢弃，防止污染里程与匹配计算。
         if (location.latitude !in -90.0..90.0 || location.longitude !in -180.0..180.0) return
         lastFixElapsedMillis = SystemClock.elapsedRealtime()
         _fixes.tryEmit(

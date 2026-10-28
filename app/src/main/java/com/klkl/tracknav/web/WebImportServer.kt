@@ -26,15 +26,32 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 
+/**
+ * 局域网导入服务的连接信息。
+ *
+ * @property ip 当前局域网 IPv4；未连 Wi-Fi 时为 null
+ * @property port 实际监听端口；启动失败时为 0
+ * @property token 每次启动重新生成的一次性路径令牌
+ */
 data class WebImportInfo(
     val ip: String?,
     val port: Int,
     val token: String,
 ) {
+    /** 完整访问地址，形如 http://192.168.1.5:8765/<token>/。 */
     val url: String?
         get() = ip?.let { "http://$it:$port/$token/" }
 }
 
+/**
+ * 手机/电脑上传 GPX 用的极简 HTTP 服务，仅监听局域网。
+ *
+ * 安全约束：
+ * - 所有路径都带一次性 token，token 错误一律 404，不暴露存在性；
+ * - 只接受 multipart 中的单个 .gpx 文件，单文件上限 20 MB；
+ * - 只读取 Content-Length 指定长度的请求体，不信任 chunked；
+ * - [stop] 时关闭监听并强制断开所有客户端，离开页面即失效。
+ */
 class WebImportServer(private val repository: RouteRepository) {
 
     private companion object {
@@ -49,8 +66,14 @@ class WebImportServer(private val repository: RouteRepository) {
     private var scope: CoroutineScope? = null
     private var serverSocket: ServerSocket? = null
     private var acceptJob: Job? = null
+    /** 已接入的客户端，用于 stop 时强制关闭，避免 keep-alive 拖住服务。 */
     private val clientSockets = mutableSetOf<Socket>()
 
+    /**
+     * 启动监听。重复调用返回现有信息，不重复开端口。
+     *
+     * 端口从 8765 开始向后尝试 10 个，尽量避开系统或其他应用占用。
+     */
     fun start(): WebImportInfo {
         if (serverSocket != null) return currentInfo()
         token = generateToken()
@@ -67,6 +90,7 @@ class WebImportServer(private val repository: RouteRepository) {
             while (isActive) {
                 val client = runCatching { socket.accept() }.getOrNull() ?: break
                 synchronized(clientSockets) { clientSockets += client }
+                // 每个连接单独协程处理，慢请求不会阻塞 accept 循环。
                 launch {
                     try {
                         client.use { handle(it) }
@@ -89,6 +113,7 @@ class WebImportServer(private val repository: RouteRepository) {
         token = token,
     )
 
+    /** 关闭监听、取消协程并断开所有已接入客户端。 */
     fun stop() {
         acceptJob?.cancel()
         acceptJob = null
@@ -103,6 +128,7 @@ class WebImportServer(private val repository: RouteRepository) {
     }
 
     private fun handle(client: Socket) {
+        // 15 s 超时防止客户端半开连接长期占用协程。
         client.soTimeout = 15_000
         val input = BufferedInputStream(client.getInputStream())
         val output = client.getOutputStream()
@@ -113,6 +139,7 @@ class WebImportServer(private val repository: RouteRepository) {
             return
         }
         val method = parts[0].uppercase(Locale.US)
+        // 查询串不参与路由，避免 ?x=1 绕开 token 校验。
         val target = parts[1].substringBefore('?')
         val headers = try {
             readHeaders(input)
@@ -130,9 +157,15 @@ class WebImportServer(private val repository: RouteRepository) {
             handleUpload(input, output, headers)
             return
         }
+        // token 不匹配与路径不存在统一返回 404，不泄露服务信息。
         respondHtml(output, 404, "Not Found", errorPage("页面不存在或 token 已失效"))
     }
 
+    /**
+     * 处理上传：先校验长度与类型，再按 Content-Length 读满整个请求体。
+     *
+     * 失败分支都会返回具体中文原因，方便用户在手机浏览器上直接看到问题。
+     */
     private fun handleUpload(
         input: InputStream,
         output: OutputStream,
@@ -147,6 +180,7 @@ class WebImportServer(private val repository: RouteRepository) {
             respondHtml(output, 413, "Payload Too Large", errorPage("文件超过 20 MB"))
             return
         }
+        // 浏览器可能先发 Expect: 100-continue 等待许可，再发请求体。
         if (headers["expect"]?.contains("100-continue", ignoreCase = true) == true) {
             output.write("HTTP/1.1 100 Continue\r\n\r\n".toByteArray(Charsets.US_ASCII))
             output.flush()
@@ -157,6 +191,7 @@ class WebImportServer(private val repository: RouteRepository) {
             return
         }
         val contentType = headers["content-type"].orEmpty()
+        // 从 Content-Type 里取出 boundary 参数，可能带双引号。
         val boundary = Regex("boundary=\"?([^\";]+)\"?", RegexOption.IGNORE_CASE)
             .find(contentType)
             ?.groupValues
@@ -184,6 +219,7 @@ class WebImportServer(private val repository: RouteRepository) {
         }
 
         val report = try {
+                // 导入会读写文件，这里同步等待结果，以便返回导入明细页。
             runBlocking { repository.importUploaded(uploaded.fileName, uploaded.bytes) }
         } catch (exception: Exception) {
             Log.w(TAG, "upload import failed", exception)
@@ -198,6 +234,7 @@ class WebImportServer(private val repository: RouteRepository) {
         respondHtml(output, 200, "OK", resultPage(report))
     }
 
+    /** 上传页：表单 action 已内嵌 token，离开页面后该地址即失效。 */
     private fun uploadPage(): String = """
         <!doctype html>
         <html lang="zh-CN">
@@ -313,6 +350,7 @@ class WebImportServer(private val repository: RouteRepository) {
         while (true) {
             val line = readLine(input) ?: break
             if (line.isEmpty()) break
+            // 累计长度限制防止恶意超长请求头耗尽内存。
             total += line.length
             if (total > MAX_HEADER_BYTES) throw IOException("headers too large")
             val separator = line.indexOf(':')
@@ -324,6 +362,7 @@ class WebImportServer(private val repository: RouteRepository) {
         return headers
     }
 
+    /** 按 CRLF 读一行（兼容裸 LF），返回 ISO-8859-1 字符串以保留原始字节。 */
     private fun readLine(input: InputStream): String? {
         val buffer = ByteArrayOutputStream()
         while (true) {
@@ -336,6 +375,7 @@ class WebImportServer(private val repository: RouteRepository) {
         return buffer.toString("ISO-8859-1")
     }
 
+    /** 读满 length 字节；连接提前关闭时返回 null。 */
     private fun readExactly(input: InputStream, length: Int): ByteArray? {
         val buffer = ByteArray(length)
         var offset = 0
@@ -347,6 +387,7 @@ class WebImportServer(private val repository: RouteRepository) {
         return buffer
     }
 
+    /** 统一输出 HTML 响应；写失败（客户端已断开）时静默忽略。 */
     private fun respondHtml(
         output: OutputStream,
         status: Int,
@@ -369,6 +410,11 @@ class WebImportServer(private val repository: RouteRepository) {
         }
     }
 
+    /**
+     * 找出适合展示给用户的局域网 IPv4 地址。
+     *
+     * 优先 wlan* 接口（手表通常走 Wi-Fi），跳过回环与 169.254 链路本地地址。
+     */
     private fun findLanIp(): String? = runCatching {
         val interfaces = Collections.list(NetworkInterface.getNetworkInterfaces())
             .filter { it.isUp && !it.isLoopback }
@@ -381,12 +427,14 @@ class WebImportServer(private val repository: RouteRepository) {
             .firstOrNull()
     }.getOrNull()
 
+    /** 生成 12 位十六进制令牌（6 字节随机数），仅本次监听有效。 */
     private fun generateToken(): String {
         val bytes = ByteArray(6)
         SecureRandom().nextBytes(bytes)
         return bytes.joinToString("") { "%02x".format(it.toInt() and 0xFF) }
     }
 
+    /** 转义 HTML 特殊字符，防止路线名/文件名注入标记。 */
     private fun escapeHtml(value: String): String = buildString(value.length) {
         for (character in value) {
             when (character) {

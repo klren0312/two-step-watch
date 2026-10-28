@@ -10,11 +10,23 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
+/**
+ * 磁罗盘读数。
+ *
+ * @property degreesTrue 真北方位角（已加磁偏角），正北 0°、顺时针增大
+ * @property reliable 传感器精度是否达到中等以上；不靠谱时导航改用 GPS 航迹角
+ */
 data class HeadingReading(
     val degreesTrue: Float,
     val reliable: Boolean,
 )
 
+/**
+ * 基于旋转矢量传感器提供真北航向。
+ *
+ * 优先用 TYPE_ROTATION_VECTOR（已融合陀螺仪，更稳），没有则退回地磁旋转矢量。
+ * 磁偏角由最近一次定位的经纬度/高程/时间用 GeomagneticField 算出。
+ */
 class HeadingProvider(context: Context) {
 
     private val sensorManager: SensorManager? =
@@ -38,9 +50,11 @@ class HeadingProvider(context: Context) {
             if (event.values.size < 3) return
             SensorManager.getRotationMatrixFromVector(rotationMatrix, event.values)
             SensorManager.getOrientation(rotationMatrix, orientation)
+            // orientation[0] 为绕 Z 轴磁方位角（弧度），转成 [0, 360) 后叠加磁偏角。
             val magnetic = ((Math.toDegrees(orientation[0].toDouble()) + 360.0) % 360.0).toFloat()
             val trueHeading = ((magnetic + declinationDegrees + 360f) % 360f)
             val previous = smoothedDegrees
+            // 低通滤波：按最短角差走 25%，避免指针抖；直接平均会在 0°/360° 处跳变。
             val smoothed = if (previous == null) {
                 trueHeading
             } else {
@@ -59,6 +73,7 @@ class HeadingProvider(context: Context) {
         }
     }
 
+    /** 用最新定位重算磁偏角；传感器不可用时保持 0°（真北近似磁北）。 */
     fun updateLocation(fix: LocationFix) {
         declinationDegrees = runCatching {
             GeomagneticField(
