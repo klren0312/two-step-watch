@@ -6,102 +6,85 @@ import org.junit.Test
 class LocationRecoveryTest {
 
     @Test
+    fun `cold start is never interrupted before the first fix`() {
+        assertEquals(
+            LocationRecoveryAction.NONE,
+            locationRecoveryAction(
+                nowElapsedMillis = 600_000L,
+                lastFixElapsedMillis = 0L,
+                lastFullRestartElapsedMillis = 0L,
+                hasFix = false,
+                hasRestarted = false,
+            ),
+        )
+    }
+
+    @Test
     fun `recent fix needs no recovery`() {
         assertEquals(
             LocationRecoveryAction.NONE,
             locationRecoveryAction(
                 nowElapsedMillis = 200_000L,
                 lastFixElapsedMillis = 198_000L,
-                lastRegisterElapsedMillis = 190_000L,
                 lastFullRestartElapsedMillis = 100_000L,
+                hasFix = true,
+                hasRestarted = true,
             ),
         )
     }
 
     @Test
-    fun `no recovery before the silence threshold`() {
-        assertEquals(
-            LocationRecoveryAction.NONE,
-            locationRecoveryAction(
-                nowElapsedMillis = 14_000L,
-                lastFixElapsedMillis = 1_000L,
-                lastRegisterElapsedMillis = 1_000L,
-                lastFullRestartElapsedMillis = 1_000L,
-            ),
-        )
-    }
-
-    @Test
-    fun `reregisters once the fix is old enough`() {
-        assertEquals(
-            LocationRecoveryAction.REREGISTER,
-            locationRecoveryAction(
-                nowElapsedMillis = 20_000L,
-                lastFixElapsedMillis = 0L,
-                lastRegisterElapsedMillis = 0L,
-                lastFullRestartElapsedMillis = 0L,
-            ),
-        )
-    }
-
-    @Test
-    fun `does not reregister too soon after the previous attempt`() {
+    fun `brief outage waits before recovery`() {
         assertEquals(
             LocationRecoveryAction.NONE,
             locationRecoveryAction(
                 nowElapsedMillis = 20_000L,
                 lastFixElapsedMillis = 0L,
-                lastRegisterElapsedMillis = 12_000L,
                 lastFullRestartElapsedMillis = 0L,
+                hasFix = true,
+                hasRestarted = false,
             ),
         )
     }
 
     @Test
-    fun `brief outage after a healthy period only reregisters`() {
+    fun `lost fix triggers one full restart`() {
         assertEquals(
-            LocationRecoveryAction.REREGISTER,
+            LocationRecoveryAction.FULL_RESTART,
             locationRecoveryAction(
                 nowElapsedMillis = 100_000L,
-                lastFixElapsedMillis = 85_000L,
-                lastRegisterElapsedMillis = 80_000L,
-                lastFullRestartElapsedMillis = 10_000L,
-            ),
-        )
-    }
-
-    @Test
-    fun `full restart after a minute without a fix`() {
-        assertEquals(
-            LocationRecoveryAction.FULL_RESTART,
-            locationRecoveryAction(
-                nowElapsedMillis = 70_000L,
-                lastFixElapsedMillis = 0L,
-                lastRegisterElapsedMillis = 0L,
+                lastFixElapsedMillis = 60_000L,
                 lastFullRestartElapsedMillis = 0L,
+                hasFix = true,
+                hasRestarted = false,
             ),
         )
     }
 
     @Test
-    fun `full restart is followed by cheaper reregistrations`() {
-        val fullRestartAt = 70_000L
+    fun `restart respects the cooldown`() {
         assertEquals(
-            LocationRecoveryAction.REREGISTER,
+            LocationRecoveryAction.NONE,
             locationRecoveryAction(
-                nowElapsedMillis = fullRestartAt + 15_000L,
-                lastFixElapsedMillis = 0L,
-                lastRegisterElapsedMillis = fullRestartAt,
-                lastFullRestartElapsedMillis = fullRestartAt,
+                nowElapsedMillis = 200_000L,
+                lastFixElapsedMillis = 100_000L,
+                lastFullRestartElapsedMillis = 100_000L,
+                hasFix = true,
+                hasRestarted = true,
             ),
         )
+    }
+
+    @Test
+    fun `restart retries after the cooldown`() {
         assertEquals(
             LocationRecoveryAction.FULL_RESTART,
             locationRecoveryAction(
-                nowElapsedMillis = fullRestartAt + 60_000L,
-                lastFixElapsedMillis = 0L,
-                lastRegisterElapsedMillis = fullRestartAt,
-                lastFullRestartElapsedMillis = fullRestartAt,
+                nowElapsedMillis = 300_000L,
+                lastFixElapsedMillis = 60_000L,
+                lastFullRestartElapsedMillis = 100_000L,
+                hasFix = true,
+                hasRestarted = true,
             ),
         )
     }

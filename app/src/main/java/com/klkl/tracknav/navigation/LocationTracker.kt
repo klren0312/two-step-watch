@@ -29,58 +29,56 @@ data class GnssSatelliteInfo(
 
 /** 超过该时长没有新定位，就视为本次定位超时（准备页可允许仍用旧点出发）。 */
 internal const val LOCATION_FIX_TIMEOUT_MILLIS = 10_000L
-/** 无定位持续该时长后开始尝试恢复。 */
-internal const val LOCATION_RECOVERY_AFTER_MILLIS = 15_000L
-/** 两次重新注册定位监听的最小间隔，防止频繁重注。 */
-internal const val LOCATION_REREGISTER_INTERVAL_MILLIS = 10_000L
-/** 无定位持续该时长后升级为完整重启（注销+重注 GNSS 状态回调）。 */
-internal const val LOCATION_FULL_RESTART_INTERVAL_MILLIS = 60_000L
+/** 已定位过后，无定位持续该时长才尝试恢复；首定位前不干预 GNSS 冷启动。 */
+internal const val LOCATION_RECOVERY_AFTER_MILLIS = 30_000L
+/** 两次完整重启的最小间隔，避免反复清零 TTFF。 */
+internal const val LOCATION_FULL_RESTART_INTERVAL_MILLIS = 180_000L
 /** 看门狗轮询间隔。 */
 private const val RECOVERY_TICK_MILLIS = 5_000L
 /** 系统缓存的上次定位只在该时间内使用，避免把几十分钟前的点当成当前位置。 */
 private const val LAST_KNOWN_MAX_AGE_MILLIS = 30_000L
 private const val TAG = "LocationTracker"
 
-/** 看门狗可采取的恢复动作，按侵入程度递增。 */
-internal enum class LocationRecoveryAction { NONE, REREGISTER, FULL_RESTART }
+/** 看门狗可采取的恢复动作。 */
+internal enum class LocationRecoveryAction { NONE, FULL_RESTART }
 
 /**
- * 根据“距上次定位/上次注册/上次完整重启”的时长，决定本轮恢复动作。
+ * 根据“距上次定位/上次完整重启”的时长，决定本轮恢复动作。
  *
  * 抽成纯函数以便单测：不依赖 Android 时钟，所有时间由调用方传入。
+ * 首定位尚未完成时不重启 GNSS，否则冷启动的 TTFF 会被反复清零。
  *
  * @param nowElapsedMillis 当前单调时钟（SystemClock.elapsedRealtime）
  * @param lastFixElapsedMillis 最后一次收到定位的时刻
- * @param lastRegisterElapsedMillis 最后一次注册监听的时刻
  * @param lastFullRestartElapsedMillis 最后一次完整重启的时刻
+ * @param hasFix 本次启动后是否已经拿到过真实定位
+ * @param hasRestarted 本次启动后是否已经执行过完整重启
  */
 internal fun locationRecoveryAction(
     nowElapsedMillis: Long,
     lastFixElapsedMillis: Long,
-    lastRegisterElapsedMillis: Long,
     lastFullRestartElapsedMillis: Long,
+    hasFix: Boolean,
+    hasRestarted: Boolean,
 ): LocationRecoveryAction {
-    val silentForMillis = nowElapsedMillis - lastFixElapsedMillis
-    if (silentForMillis < LOCATION_RECOVERY_AFTER_MILLIS) {
+    if (!hasFix) return LocationRecoveryAction.NONE
+    if (nowElapsedMillis - lastFixElapsedMillis < LOCATION_RECOVERY_AFTER_MILLIS) {
         return LocationRecoveryAction.NONE
     }
-    if (nowElapsedMillis - lastRegisterElapsedMillis < LOCATION_REREGISTER_INTERVAL_MILLIS) {
-        return LocationRecoveryAction.NONE
-    }
-    return if (silentForMillis >= LOCATION_FULL_RESTART_INTERVAL_MILLIS &&
-        nowElapsedMillis - lastFullRestartElapsedMillis >= LOCATION_FULL_RESTART_INTERVAL_MILLIS
+    if (hasRestarted && nowElapsedMillis - lastFullRestartElapsedMillis <
+        LOCATION_FULL_RESTART_INTERVAL_MILLIS
     ) {
-        LocationRecoveryAction.FULL_RESTART
-    } else {
-        LocationRecoveryAction.REREGISTER
+        return LocationRecoveryAction.NONE
     }
+    return LocationRecoveryAction.FULL_RESTART
 }
 
 /**
  * GNSS 定位采集器：封装 LocationManager 与卫星状态，并对“定位静默”做自动恢复。
  *
  * 手表在户外/低温/后台时容易丢定位，所以除了注册监听，还跑一个 5 s 周期的看门狗：
- * 静默 15 s 重新注册，静默 60 s 完整重启。所有恢复动作都只重建监听，不清空已积累的状态。
+ * 首定位前不干预 GNSS 冷启动；拿到过定位后若静默 30 s，做一次完整重启，
+ * 两次完整重启至少间隔 180 s，避免反复清零 TTFF。
  */
 class LocationTracker(private val context: Context) {
 
@@ -104,13 +102,15 @@ class LocationTracker(private val context: Context) {
 
     private var running = false
     private var gnssRegistered = false
+    private var hasFixSinceStart = false
+    private var hasRestartedSinceStart = false
     private var intervalMillis = 1_000L
     private var lastFixElapsedMillis = 0L
-    private var lastRegisterElapsedMillis = 0L
     private var lastFullRestartElapsedMillis = 0L
 
     private val listener = object : LocationListener {
         override fun onLocationChanged(location: Location) {
+            hasFixSinceStart = true
             emit(location)
         }
 
@@ -155,20 +155,12 @@ class LocationTracker(private val context: Context) {
                     locationRecoveryAction(
                         nowElapsedMillis = now,
                         lastFixElapsedMillis = lastFixElapsedMillis,
-                        lastRegisterElapsedMillis = lastRegisterElapsedMillis,
                         lastFullRestartElapsedMillis = lastFullRestartElapsedMillis,
+                        hasFix = hasFixSinceStart,
+                        hasRestarted = hasRestartedSinceStart,
                     )
                 ) {
                     LocationRecoveryAction.FULL_RESTART -> fullRestart(now)
-                    LocationRecoveryAction.REREGISTER -> {
-                        Log.w(
-                            TAG,
-                            "re-requesting updates after ${now - lastFixElapsedMillis} ms " +
-                                "without a fix",
-                        )
-                        registerUpdates()
-                    }
-
                     LocationRecoveryAction.NONE -> Unit
                 }
             }
@@ -192,9 +184,10 @@ class LocationTracker(private val context: Context) {
         if (running) return true
         running = true
         val now = SystemClock.elapsedRealtime()
+        hasFixSinceStart = false
+        hasRestartedSinceStart = false
         lastFixElapsedMillis = now
-        lastRegisterElapsedMillis = now
-        lastFullRestartElapsedMillis = now
+        lastFullRestartElapsedMillis = 0L
         refreshGpsEnabled()
         registerUpdates()
         registerGnssStatus()
@@ -241,21 +234,22 @@ class LocationTracker(private val context: Context) {
             .onFailure { Log.w(TAG, "removeUpdates failed: ${it.message}") }
         unregisterGnssStatus()
         _satellites.value = GnssSatelliteInfo()
+        hasFixSinceStart = false
+        hasRestartedSinceStart = false
         lastFixElapsedMillis = 0L
-        lastRegisterElapsedMillis = 0L
         lastFullRestartElapsedMillis = 0L
     }
 
     /**
      * 调整定位间隔（毫秒）。低功耗模式用 5 s，正常导航用 1 s。
      *
-     * 仅在运行中才立即重注册，否则只记录值，下次 start 生效。
+     * 首定位完成前不重建请求，避免打断 GNSS 冷启动；仅在运行中才立即重注册。
      */
     fun setTrackingInterval(minTimeMillis: Long) {
         val newInterval = minTimeMillis.coerceAtLeast(1_000L)
         if (newInterval == intervalMillis) return
         intervalMillis = newInterval
-        if (!running || !hasPermission()) return
+        if (!running || !hasPermission() || !hasFixSinceStart) return
         registerUpdates()
     }
 
@@ -263,7 +257,6 @@ class LocationTracker(private val context: Context) {
     private fun registerUpdates() {
         val manager = locationManager ?: return
         if (!hasPermission()) return
-        lastRegisterElapsedMillis = SystemClock.elapsedRealtime()
         runCatching {
             manager.requestLocationUpdates(
                 LocationManager.GPS_PROVIDER,
@@ -311,6 +304,7 @@ class LocationTracker(private val context: Context) {
         registerUpdates()
         registerGnssStatus()
         lastFullRestartElapsedMillis = now
+        hasRestartedSinceStart = true
     }
 
     private fun refreshGpsEnabled() {

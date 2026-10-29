@@ -205,6 +205,19 @@ fun PrepareScreen(
             }
         }
 
+        if (!preparing.replay && permissionGranted && preparing.gpsEnabled &&
+            currentFix == null && waitedMillis >= 10_000L
+        ) {
+            item {
+                Button(
+                    onClick = { viewModel.startPreparedNavigation(useNearest = false) },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("无定位仍开始")
+                }
+            }
+        }
+
         if (!preparing.replay && !permissionGranted) {
             item {
                 Button(
